@@ -1,0 +1,32 @@
+# Core
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+python-dotenv>=1.0.0
+
+# AI / LangChain
+langchain>=0.3.0
+langchain-openai>=0.3.0
+langgraph>=0.2.0
+langfuse>=3.6.0
+
+# Database / Supabase PostgreSQL
+SQLAlchemy>=2.0.36,<3
+asyncpg>=0.30.0,<1
+pgvector>=0.3.6,<1
+neo4j>=5.28.0,<6
+openai>=1.68.0,<2
+
+# GraphRAG utilities
+langchain-text-splitters>=0.3.0,<1
+
+# Dev tools
+ruff>=0.8.0
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+httpx>=0.28.0
+
+# BHYT / viện phí release pipeline
+numpy>=1.26,<3
+psycopg[binary]>=3.2,<4
