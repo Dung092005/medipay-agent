@@ -16,10 +16,11 @@ def _ensure_engine():
     global _engine, _session_factory
     settings = get_settings()
     if _engine is None:
-        if not settings.database_url:
-            raise RuntimeError("DATABASE_URL is not configured")
+        database_url = settings.effective_database_url
+        if not database_url:
+            raise RuntimeError("RUNTIME_DATABASE_URL/DATABASE_URL is not configured")
         _engine = create_async_engine(
-            settings.database_url,
+            database_url,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_timeout=settings.db_pool_timeout,

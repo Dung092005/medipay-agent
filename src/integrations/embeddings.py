@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import lru_cache
 from typing import Protocol
 
 from src.config import get_settings
@@ -10,11 +11,18 @@ class EmbeddingModel(Protocol):
     async def embed_query(self, text: str) -> Sequence[float]:
         """Return embedding vector for text."""
 
+    async def embed_queries(self, texts: Sequence[str]) -> list[Sequence[float]]:
+        """Return vectors in the same order for a bounded sub-query batch."""
+
 
 class OpenAIEmbeddingModel:
-    def __init__(self, api_key: str, model: str, dimensions: int):
+    def __init__(self, api_key: str, model: str, dimensions: int, base_url: str = ""):
         from openai import AsyncOpenAI
-        self.client = AsyncOpenAI(api_key=api_key)
+
+        kwargs: dict = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self.client = AsyncOpenAI(**kwargs)
         self.model = model
         self.dimensions = dimensions
 
@@ -24,15 +32,34 @@ class OpenAIEmbeddingModel:
         )
         return response.data[0].embedding
 
+    async def embed_queries(self, texts: Sequence[str]) -> list[Sequence[float]]:
+        values = list(texts)
+        if not values:
+            return []
+        response = await self.client.embeddings.create(
+            model=self.model, input=values, dimensions=self.dimensions
+        )
+        ordered = sorted(response.data, key=lambda item: int(item.index))
+        return [item.embedding for item in ordered]
+
 
 class UnconfiguredEmbeddingModel:
     async def embed_query(self, text: str) -> Sequence[float]:
         raise RuntimeError("OPENAI_API_KEY is required for text-embedding-3-small")
 
+    async def embed_queries(self, texts: Sequence[str]) -> list[Sequence[float]]:
+        raise RuntimeError("OPENAI_API_KEY is required for text-embedding-3-small")
 
+
+@lru_cache(maxsize=1)
 def get_embedding_model() -> EmbeddingModel:
     settings = get_settings()
     api_key = settings.embedding_api_key or settings.openai_api_key
     if not api_key:
         return UnconfiguredEmbeddingModel()
-    return OpenAIEmbeddingModel(api_key, settings.embedding_model, settings.embedding_dimensions)
+    return OpenAIEmbeddingModel(
+        api_key,
+        settings.embedding_model,
+        settings.embedding_dimensions,
+        base_url=settings.openai_base_url,
+    )

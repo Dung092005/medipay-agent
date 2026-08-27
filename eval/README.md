@@ -1,6 +1,70 @@
 # Live RAGAS evaluation
 
-Evaluation chuẩn nằm duy nhất tại `eval/results/canonical-live-ragas/`.
+The generic live Ragas harness is implemented in `eval/golden_eval.py`.
+
+## BHYT 200 candidate evaluation
+
+The current BHYT run is stored at `eval/results/bhyt-200-current/`. It uses the
+200 records in `data/eval/bhyt_good_candidates.json` and calls the configured
+GraphRAG agent in read-only mode. These records are still candidates: the
+`official_answer` field is an unreviewed reference and is not final legal gold.
+
+The completed runtime-only run produced:
+
+- `bhyt_dataset.jsonl`: evaluator input, one case per candidate.
+- `actual_answers.jsonl`: the real model answer, retrieved evidence, citations,
+  runtime status, and latency for every case.
+- `deterministic_case_scores.jsonl`: runtime/fallback/retrieval observations per case.
+- `deterministic_summary.json`: aggregate counts.
+- `deterministic_report.md`: short human-readable report.
+- `run_manifest.json`: run mode, model metadata, threshold, and reference status.
+
+Open the folder in Explorer:
+
+```powershell
+explorer .\eval\results\bhyt-200-current
+```
+
+The runtime-only command is:
+
+```powershell
+.\.venv\Scripts\python.exe eval\bhyt_eval.py run `
+  --candidates data\eval\bhyt_good_candidates.json `
+  --out eval\results\bhyt-200-current `
+  --deterministic-only `
+  --count 200 `
+  --threshold 0.60
+```
+
+This command does not assign answer-quality points. It is used when Ragas is
+not installed or cannot reach its dependency index.
+
+After installing the isolated Ragas environment, score the already captured
+answers without calling the model again:
+
+```powershell
+.\.eval-ragas-venv\Scripts\python.exe -m pip install "ragas==0.3.9" "langchain-openai<1"
+
+.\.eval-ragas-venv\Scripts\python.exe eval\bhyt_eval.py ragas-score `
+  --dataset eval\results\bhyt-200-current\bhyt_dataset.jsonl `
+  --actual eval\results\bhyt-200-current\actual_answers.jsonl `
+  --out eval\results\bhyt-200-current `
+  --ragas eval\results\bhyt-200-current\ragas_scores.jsonl `
+  --evaluator-model gpt-4o-mini `
+  --embedding-model text-embedding-3-small `
+  --concurrency 3
+
+.\.venv\Scripts\python.exe eval\bhyt_eval.py finalize `
+  --dataset eval\results\bhyt-200-current\bhyt_dataset.jsonl `
+  --actual eval\results\bhyt-200-current\actual_answers.jsonl `
+  --ragas eval\results\bhyt-200-current\ragas_scores.jsonl `
+  --out eval\results\bhyt-200-current `
+  --threshold 0.60
+```
+
+After Ragas scoring, inspect `ragas_scores.jsonl`, `case_scores.jsonl`,
+`summary.json`, `report.md`, and `failures.md`. Ragas is the evaluator/judge;
+the model under test remains `MODEL_NAME` from `.env`.
 
 ## Đọc kết quả
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import os
 import re
 import sys
 import unicodedata
@@ -19,23 +18,39 @@ from pathlib import Path
 from typing import Any
 
 from data_pipeline.page_index import PAGE_INDEX_VERSION, build_page_index, unit_for_offset
-from data_pipeline.tables import extract_html_tables
+from data_pipeline.tables import TABLE_EXTRACTION_VERSION, extract_html_tables
 
-csv.field_size_limit(sys.maxsize)
+# Windows C long cannot hold sys.maxsize; use the largest safe limit.
+try:
+    csv.field_size_limit(sys.maxsize)
+except OverflowError:
+    csv.field_size_limit(int(1e9))
 
 NORMALIZER_VERSION = "html-visible-text-v1"
-PASSAGE_VERSION = "legal-unit-sentence-token-chunks-v4"
-CHUNK_TARGET_TOKENS = 144
-CHUNK_WORD_TARGET = 80
-CHUNK_OVERLAP_WORDS = 16
+PASSAGE_VERSION = "legal-unit-sentence-token-chunks-v5"
+CHUNK_TARGET_TOKENS = 320
+CHUNK_WORD_TARGET = 220
+CHUNK_OVERLAP_WORDS = 32
 LEGAL_UNIT_VERSION = PAGE_INDEX_VERSION
 AUTHORITY_FILES = ("metadata.csv", "content.csv", "relationships.csv")
+OPTIONAL_AUTHORITY_FILES = ("aliases.csv",)
 PROJECTION_FILES = ("documents.csv", "metadata_bhyt.csv", "metadata_vien_phi.csv")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SPACE = re.compile(r"\s+")
 _CATEGORIES = {"bhyt", "vien_phi"}
 _BOOL_TRUE = {"true", "1", "yes", "y", "đúng", "co", "có"}
 _BOOL_FALSE = {"false", "0", "no", "n", "sai", "không", "khong"}
+_LOW_VALUE_RETRIEVAL_TEXT = {
+    "cộng hòa xã hội chủ nghĩa việt nam",
+    "hướng dẫn:",
+    "nghị quyết",
+    "phụ lục",
+    "quyết định",
+    "quyết định:",
+    "quyết nghị",
+    "quyết nghị:",
+    "trong đó:",
+}
 
 
 class SnapshotValidationError(ValueError):
@@ -89,6 +104,17 @@ def _bool_field(value: str | None, *, field: str, row_number: int) -> bool:
     if normalized in _BOOL_FALSE or not normalized:
         return False
     raise SnapshotValidationError(f"relationships.csv row {row_number} has invalid {field}: {value!r}")
+
+
+def _metadata_bool(value: str | None, *, default: bool = True) -> bool:
+    normalized = _clean(value).casefold()
+    if not normalized:
+        return default
+    if normalized in _BOOL_TRUE:
+        return True
+    if normalized in _BOOL_FALSE:
+        return False
+    raise SnapshotValidationError(f"Invalid metadata boolean: {value!r}")
 
 
 def _read_csv(path: Path, *, preserve_fields: frozenset[str] = frozenset()) -> list[dict[str, str]]:
@@ -311,6 +337,15 @@ def _retrieval_blocks(
     of useless semantic vectors.
     """
 
+    units_by_id = {str(unit["unit_id"]): unit for unit in units}
+    exact_table_spans = [
+        (int(unit["source_start"]), int(unit["source_end"]))
+        for unit in units
+        if unit.get("unit_type") == "table"
+        and unit.get("source_span_quality") == "exact"
+        and unit.get("source_start") is not None
+        and unit.get("source_end") is not None
+    ]
     located: list[tuple[str, str, int, int]] = []
     cursor = 0
     for _, text in blocks:
@@ -319,6 +354,10 @@ def _retrieval_blocks(
             continue
         end = start + len(text)
         cursor = end
+        # Tables get one header-aware retrieval passage per logical row below;
+        # indexing individual TD blocks produces context-free prices/codes.
+        if any(table_start <= start < table_end for table_start, table_end in exact_table_spans):
+            continue
         unit_id = unit_for_offset(units, start)
         located.append((unit_id, text, start, end))
 
@@ -331,7 +370,26 @@ def _retrieval_blocks(
     def flush() -> None:
         nonlocal pending_unit, pending_text, pending_start, pending_end
         if pending_text:
-            result.append((pending_unit, "\n\n".join(pending_text), pending_start, pending_end))
+            # Slice the canonical projection instead of recreating separators;
+            # source offsets then remain exact even around nested inline tags.
+            text = normalized_text[pending_start:pending_end]
+            unit = units_by_id.get(pending_unit, {})
+            compact = _clean(text)
+            words = re.findall(r"[\wÀ-ỹ]+", compact, flags=re.UNICODE)
+            normalized = compact.casefold()
+            label = _clean(str(unit.get("label", ""))).casefold()
+            heading = _clean(str(unit.get("heading", ""))).casefold()
+            pure_number_or_marks = not re.search(r"[A-Za-zÀ-ỹĐđ]", compact)
+            structural_echo = normalized in {label, heading} and len(compact) < 40
+            low_value = (
+                not compact
+                or normalized in _LOW_VALUE_RETRIEVAL_TEXT
+                or pure_number_or_marks
+                or structural_echo
+                or (len(compact) < 20 and len(words) < 4)
+            )
+            if not low_value:
+                result.append((pending_unit, text, pending_start, pending_end))
         pending_unit = ""
         pending_text = []
 
@@ -345,10 +403,67 @@ def _retrieval_blocks(
         pending_end = end
     flush()
     split_result: list[tuple[str, str, int, int]] = []
+    seen_text: set[str] = set()
     for unit_id, text, start, end in result:
         for local_start, local_end, piece in _split_sentence_aware(text, token_count):
+            digest = _sha256(_clean(piece))
+            if digest in seen_text:
+                continue
+            seen_text.add(digest)
             split_result.append((unit_id, piece, start + local_start, start + local_end))
     return split_result
+
+
+def _table_row_passages(table: Any, *, source_start: int, source_end: int) -> list[dict[str, Any]]:
+    """Create header-aware retrieval text while retaining cell-level evidence."""
+
+    if table.row_count < 3 or table.column_count < 2 or source_end <= source_start:
+        return []
+    rows: dict[int, list[dict[str, Any]]] = {}
+    for record in table.records:
+        rows.setdefault(int(record["row_index"]), []).append(record)
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row_index, records in sorted(rows.items()):
+        ordered = sorted(records, key=lambda item: int(item["column_index"]))
+        values = [_clean(str(item.get("value", ""))) for item in ordered]
+        if not any(values):
+            continue
+        # Header rows repeat their own labels; indexing them separately adds no
+        # answerable fact and creates large duplicate groups across documents.
+        if all(
+            not value
+            or value.casefold() in _clean(str(item.get("header", ""))).casefold().split(" / ")
+            for item, value in zip(ordered, values, strict=True)
+        ):
+            continue
+        parts: list[str] = []
+        for item, value in zip(ordered, values, strict=True):
+            if not value:
+                continue
+            header = _clean(str(item.get("header", "")))
+            if not header or re.fullmatch(r"column_\d+", header, flags=re.IGNORECASE):
+                part = value
+            elif header.casefold() == value.casefold():
+                part = value
+            else:
+                part = f"{header}: {value}"
+            if part not in parts:
+                parts.append(part)
+        text = " | ".join(parts)
+        if len(text) < 20 or not re.search(r"[A-Za-zÀ-ỹĐđ]", text):
+            continue
+        digest = _sha256(_clean(text))
+        if digest in seen:
+            continue
+        seen.add(digest)
+        result.append({
+            "text": text,
+            "row_index": row_index,
+            "source_start": source_start,
+            "source_end": source_end,
+        })
+    return result
 
 
 @dataclass(frozen=True)
@@ -361,6 +476,7 @@ class CanonicalSnapshot:
     relationships: tuple[dict[str, Any], ...]
     passages: tuple[dict[str, Any], ...]
     legal_units: tuple[dict[str, Any], ...]
+    aliases: tuple[dict[str, Any], ...]
     validation_issues: tuple[dict[str, str], ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -373,6 +489,7 @@ class CanonicalSnapshot:
             "relationships": list(self.relationships),
             "passages": list(self.passages),
             "legal_units": list(self.legal_units),
+            "aliases": list(self.aliases),
             "validation_issues": list(self.validation_issues),
         }
 
@@ -410,6 +527,7 @@ def build_snapshot(source_dir: str | Path) -> CanonicalSnapshot:
     metadata_rows = _read_csv(base / "metadata.csv")
     content_rows = _read_csv(base / "content.csv", preserve_fields=frozenset({"content_html"}))
     relationship_rows = _read_csv(base / "relationships.csv")
+    alias_rows = _read_csv(base / "aliases.csv") if (base / "aliases.csv").is_file() else []
     documents: dict[str, dict[str, str]] = {}
     for row in metadata_rows:
         identifier = _clean(row.get("id"))
@@ -424,7 +542,39 @@ def build_snapshot(source_dir: str | Path) -> CanonicalSnapshot:
             raise SnapshotValidationError(f"content.csv has missing or duplicate id: {identifier!r}")
         if identifier not in documents:
             raise SnapshotValidationError(f"content.csv references unknown metadata id: {identifier}")
+        raw_html = row.get("content_html") or ""
+        declared_html_hash = _clean(row.get("content_html_sha256"))
+        declared_text_hash = _clean(row.get("visible_text_sha256"))
+        if declared_html_hash and declared_html_hash != _sha256(raw_html):
+            raise SnapshotValidationError(f"content.csv raw HTML hash mismatch: {identifier}")
+        if declared_text_hash and declared_text_hash != _sha256(normalize_html(raw_html)):
+            raise SnapshotValidationError(f"content.csv visible-text hash mismatch: {identifier}")
         contents[identifier] = row
+
+    aliases: dict[str, dict[str, str]] = {}
+    for row_number, row in enumerate(alias_rows, start=2):
+        alias_id = _clean(row.get("alias_document_id"))
+        canonical_id = _clean(row.get("canonical_document_id"))
+        if not alias_id or not canonical_id or alias_id == canonical_id:
+            raise SnapshotValidationError(f"aliases.csv row {row_number} has an invalid mapping")
+        if alias_id in aliases or alias_id in documents:
+            raise SnapshotValidationError(f"aliases.csv has a duplicate/canonical alias id: {alias_id}")
+        if canonical_id not in documents:
+            raise SnapshotValidationError(f"aliases.csv references unknown canonical id: {canonical_id}")
+        aliases[alias_id] = row
+
+    def resolve_alias(identifier: str) -> str:
+        seen: set[str] = set()
+        current = identifier
+        while current in aliases:
+            if current in seen:
+                raise SnapshotValidationError(f"aliases.csv contains a cycle involving {identifier}")
+            seen.add(current)
+            current = _clean(aliases[current].get("canonical_document_id"))
+        return current
+
+    for alias_id in aliases:
+        resolve_alias(alias_id)
 
     canonical_documents = tuple(
         {"document_id": identifier, "node_kind": "canonical_document", "metadata": dict(row)}
@@ -442,10 +592,29 @@ def build_snapshot(source_dir: str | Path) -> CanonicalSnapshot:
         raw_html = contents.get(identifier, {}).get("content_html", "")
         blocks = _parse_html(raw_html)
         normalized_text = "\n\n".join(text for _, text in blocks)
+        index_eligible = _metadata_bool(row.get("index_eligible"), default=True)
+        semantic_eligible = _metadata_bool(row.get("semantic_eligible"), default=True)
+        lexical_eligible = _metadata_bool(row.get("lexical_eligible"), default=True)
+        if semantic_eligible and not index_eligible:
+            raise SnapshotValidationError(f"Document {identifier} is semantic-eligible but not index-eligible")
+        canonical_content.append({
+            "document_id": identifier,
+            "raw_html": raw_html,
+            "raw_html_sha256": _sha256(raw_html),
+            "normalized_text": normalized_text,
+            "normalized_text_sha256": _sha256(normalized_text),
+            "content_available": bool(normalized_text),
+            "parser_version": NORMALIZER_VERSION,
+            "source_kind": contents.get(identifier, {}).get("source_kind", ""),
+            "source_document_id": contents.get(identifier, {}).get("source_document_id", identifier),
+        })
+        if not index_eligible:
+            continue
         document_units = build_page_index(
             identifier, normalized_text, raw_html_sha256=_sha256(raw_html),
         )
         table_search_cursor = 0
+        document_tables: list[tuple[Any, int, int]] = []
         for table in extract_html_tables(identifier, raw_html):
             table_values = [str(record.get("value", "")) for record in table.records if str(record.get("value", ""))]
             table_text = "\n".join(table_values)
@@ -492,17 +661,22 @@ def build_snapshot(source_dir: str | Path) -> CanonicalSnapshot:
                 "text_sha256": table.table_text_sha256,
                 "parse_method": "deterministic",
                 "parse_confidence": 1.0,
-                "parser_version": table.extraction_version if hasattr(table, "extraction_version") else "html-tables-deterministic-v1",
+                "parser_version": TABLE_EXTRACTION_VERSION,
                 "source_span_quality": source_span_quality,
             })
+            if isinstance(table_start, int) and isinstance(table_end, int):
+                document_tables.append((table, table_start, table_end))
         legal_units.extend(document_units)
-        canonical_content.append({"document_id": identifier, "raw_html": raw_html, "raw_html_sha256": _sha256(raw_html), "normalized_text": normalized_text, "normalized_text_sha256": _sha256(normalized_text), "content_available": bool(normalized_text), "parser_version": NORMALIZER_VERSION})
-        for order, (unit_id, text, source_start, source_end) in enumerate(
-            _retrieval_blocks(blocks, normalized_text, document_units, token_count), start=1
+        order = 0
+        units_by_id = {str(item["unit_id"]): item for item in document_units}
+        document_passage_by_hash: dict[str, dict[str, Any]] = {}
+        for unit_id, text, source_start, source_end in _retrieval_blocks(
+            blocks, normalized_text, document_units, token_count
         ):
+            order += 1
             passage_id = _sha256(f"{identifier}:{PASSAGE_VERSION}:{order}:{source_start}:{source_end}:{text}")[:32]
-            unit = next((item for item in document_units if item["unit_id"] == unit_id), None)
-            passages.append({
+            unit = units_by_id.get(unit_id)
+            passage = {
                 "passage_id": passage_id,
                 "document_id": identifier,
                 "unit_id": unit_id,
@@ -514,24 +688,79 @@ def build_snapshot(source_dir: str | Path) -> CanonicalSnapshot:
                 "text_sha256": _sha256(text),
                 "parser_version": NORMALIZER_VERSION,
                 "chunker_version": PASSAGE_VERSION,
-            })
+                "semantic_eligible": semantic_eligible,
+                "lexical_eligible": lexical_eligible,
+                "passage_kind": "prose",
+            }
+            passages.append(passage)
+            document_passage_by_hash[_sha256(_clean(text))] = passage
+        for table, table_start, table_end in document_tables:
+            for row_passage in _table_row_passages(table, source_start=table_start, source_end=table_end):
+                for _, _, piece in _split_by_token_budget(row_passage["text"], token_count):
+                    piece_hash = _sha256(_clean(piece))
+                    if piece_hash in document_passage_by_hash:
+                        document_passage_by_hash[piece_hash].setdefault("alternate_sources", []).append({
+                            "passage_kind": "table_row",
+                            "table_id": table.table_id,
+                            "table_row_index": row_passage["row_index"],
+                            "source_start": table_start,
+                            "source_end": table_end,
+                        })
+                        continue
+                    order += 1
+                    passage_id = _sha256(
+                        f"{identifier}:{PASSAGE_VERSION}:table:{table.table_id}:"
+                        f"{row_passage['row_index']}:{piece}"
+                    )[:32]
+                    passage = {
+                        "passage_id": passage_id,
+                        "document_id": identifier,
+                        "unit_id": table.table_id,
+                        "passage_order": order,
+                        "section_label": f"Table {table.table_ordinal}, row {row_passage['row_index']}",
+                        "text": piece,
+                        "source_start": table_start,
+                        "source_end": table_end,
+                        "text_sha256": _sha256(piece),
+                        "parser_version": TABLE_EXTRACTION_VERSION,
+                        "chunker_version": PASSAGE_VERSION,
+                        # Exact prices/codes are served by lexical + structured
+                        # table retrieval. Embedding every row is expensive and
+                        # tends to blur nearby numeric facts.
+                        "semantic_eligible": False,
+                        "lexical_eligible": lexical_eligible,
+                        "passage_kind": "table_row",
+                        "table_id": table.table_id,
+                        "table_row_index": row_passage["row_index"],
+                    }
+                    passages.append(passage)
+                    document_passage_by_hash[piece_hash] = passage
 
     relationships: list[dict[str, Any]] = []
+    relationship_identities: set[tuple[str, str, str]] = set()
     for row_number, row in enumerate(relationship_rows, start=2):
-        source = _clean(row.get("doc_id"))
-        target = _clean(row.get("other_doc_id"))
+        source = resolve_alias(_clean(row.get("doc_id")))
+        target = resolve_alias(_clean(row.get("other_doc_id")))
         relation_type = _clean(row.get("relationship"))
         if not source or not target or not relation_type:
             raise SnapshotValidationError(f"relationships.csv row {row_number} lacks endpoint or relationship")
+        if source == target:
+            raise SnapshotValidationError(f"relationships.csv row {row_number} becomes a self-loop after alias resolution")
+        edge_identity = (source, target, relation_type)
+        if edge_identity in relationship_identities:
+            raise SnapshotValidationError(f"relationships.csv row {row_number} duplicates a canonical edge: {edge_identity}")
+        relationship_identities.add(edge_identity)
         relation_categories = _categories(row.get("agent_category", ""))
         identity = "|".join((source, target, relation_type, ",".join(relation_categories)))
-        relationships.append({"relationship_id": _sha256(identity), "source_document_id": source, "target_document_id": target, "relationship_type": relation_type, "categories": list(relation_categories), "source_is_selected": _bool_field(row.get("source_is_selected"), field="source_is_selected", row_number=row_number), "target_is_selected": _bool_field(row.get("target_is_selected"), field="target_is_selected", row_number=row_number), "relationship_is_adverse": _bool_field(row.get("relationship_is_adverse"), field="relationship_is_adverse", row_number=row_number), "source_title_raw": row.get("source_title", ""), "target_title_raw": row.get("target_title", ""), "source_row_hash": _sha256(_canonical_json(row))})
+        relationship_id = _clean(row.get("relationship_id")) or _sha256(identity)
+        relationships.append({"relationship_id": relationship_id, "source_document_id": source, "target_document_id": target, "relationship_type": relation_type, "categories": list(relation_categories), "source_is_selected": _bool_field(row.get("source_is_selected"), field="source_is_selected", row_number=row_number), "target_is_selected": _bool_field(row.get("target_is_selected"), field="target_is_selected", row_number=row_number), "relationship_is_adverse": _bool_field(row.get("relationship_is_adverse"), field="relationship_is_adverse", row_number=row_number), "source_title_raw": row.get("source_title", ""), "target_title_raw": row.get("target_title", ""), "source_row_hash": _sha256(_canonical_json(row)), "provenance_status": row.get("provenance_status", ""), "adverse_provenance": row.get("adverse_provenance", "")})
 
-    file_hashes = {name: _sha256((base / name).read_bytes()) for name in AUTHORITY_FILES}
+    authority_files = AUTHORITY_FILES + tuple(name for name in OPTIONAL_AUTHORITY_FILES if (base / name).is_file())
+    file_hashes = {name: _sha256((base / name).read_bytes()) for name in authority_files}
     as_of_dates = sorted(_clean(row.get("status_checked_at")) for row in metadata_rows if _clean(row.get("status_checked_at")))
     manifest = {
-        "schema_version": 3,
-        "pipeline_version": "canonical-evidence-v4",
+        "schema_version": 4,
+        "pipeline_version": "canonical-evidence-v5",
         "normalizer_version": NORMALIZER_VERSION,
         "passage_version": PASSAGE_VERSION,
         "legal_unit_version": LEGAL_UNIT_VERSION,
@@ -545,8 +774,13 @@ def build_snapshot(source_dir: str | Path) -> CanonicalSnapshot:
             "content_available": sum(bool(row["content_available"]) for row in canonical_content),
             "categories": len(categories),
             "relationships": len(relationships),
+            "aliases": len(aliases),
             "passages": len(passages),
+            "prose_passages": sum(row.get("passage_kind") == "prose" for row in passages),
+            "table_row_passages": sum(row.get("passage_kind") == "table_row" for row in passages),
             "legal_units": len(legal_units),
+            "index_eligible_documents": sum(_metadata_bool(row.get("index_eligible"), default=True) for row in metadata_rows),
+            "semantic_eligible_documents": sum(_metadata_bool(row.get("semantic_eligible"), default=True) for row in metadata_rows),
             "table_source_span_fallbacks": table_fallbacks,
         },
         "chunk_validation": {
@@ -558,4 +792,16 @@ def build_snapshot(source_dir: str | Path) -> CanonicalSnapshot:
     }
     manifest_hash = _sha256(_canonical_json(manifest))
     manifest["source_manifest_sha256"] = manifest_hash
-    return CanonicalSnapshot(dataset_id=f"snapshot-{manifest_hash[:16]}", manifest=manifest, documents=canonical_documents, content=tuple(canonical_content), categories=tuple(categories), relationships=tuple(relationships), passages=tuple(passages), legal_units=tuple(legal_units), validation_issues=tuple(_projection_issues(base, documents, contents)))
+    canonical_aliases = tuple(
+        {
+            "alias_document_id": alias_id,
+            "canonical_document_id": resolve_alias(_clean(row.get("canonical_document_id"))),
+            "alias_type": row.get("alias_type", ""),
+            "confidence": row.get("confidence", ""),
+            "reason": row.get("reason", ""),
+            "evidence_url": row.get("evidence_url", ""),
+            "metadata": dict(row),
+        }
+        for alias_id, row in sorted(aliases.items())
+    )
+    return CanonicalSnapshot(dataset_id=f"snapshot-{manifest_hash[:16]}", manifest=manifest, documents=canonical_documents, content=tuple(canonical_content), categories=tuple(categories), relationships=tuple(relationships), passages=tuple(passages), legal_units=tuple(legal_units), aliases=canonical_aliases, validation_issues=tuple(_projection_issues(base, documents, contents)))

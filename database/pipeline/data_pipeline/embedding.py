@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 
 DEFAULT_MODEL = "text-embedding-3-small"
 DEFAULT_DIMENSIONS = 1536
@@ -18,13 +17,21 @@ def dimensions() -> int:
     return int(os.getenv("EMBEDDING_DIMENSIONS", str(DEFAULT_DIMENSIONS)))
 
 
-def embed_query(text: str) -> list[float]:
+def _openai_client():
     from openai import OpenAI
 
     key = os.getenv("OPENAI_API_KEY", "").strip()
     if not key:
         raise RuntimeError("OPENAI_API_KEY is required for text-embedding-3-small")
-    response = OpenAI(api_key=key).embeddings.create(
+    kwargs: dict = {"api_key": key}
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
+
+
+def embed_query(text: str) -> list[float]:
+    response = _openai_client().embeddings.create(
         model=model_name(), input=text, dimensions=dimensions()
     )
     vector = response.data[0].embedding
@@ -34,12 +41,7 @@ def embed_query(text: str) -> list[float]:
 
 
 def embed_batch(texts: list[str]) -> list[list[float]]:
-    from openai import OpenAI
-
-    key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("OPENAI_API_KEY is required for text-embedding-3-small")
-    response = OpenAI(api_key=key).embeddings.create(
+    response = _openai_client().embeddings.create(
         model=model_name(), input=texts, dimensions=dimensions()
     )
     ordered = sorted(response.data, key=lambda item: item.index)

@@ -1,14 +1,17 @@
 "use client";
 
-import { FormEvent, forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, forwardRef, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import Image from "next/image";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 
-import { ChatCitation, ChatHistoryMessage, sendChatMessage } from "../lib/api";
+import { ChatCitation, sendChatMessageStream } from "../lib/api";
+import { useAuth } from "../lib/auth-context";
+import { AuthRoute } from "../components/auth-route";
 
-type ChatMessage = ChatHistoryMessage & { id: string; citations?: ChatCitation[] };
-type IconName = "arrow" | "book" | "chat" | "check" | "chevron" | "close" | "document" | "help" | "history" | "menu" | "new" | "review" | "search" | "shield" | "spark";
+type ChatMessage = { role: "user" | "assistant"; content: string; id: string; citations?: ChatCitation[] };
+type IconName = "arrow" | "book" | "chat" | "check" | "chevron" | "close" | "document" | "help" | "history" | "logout" | "menu" | "new" | "review" | "search" | "shield" | "spark" | "user";
 
 const topicCards = [
   {
@@ -70,9 +73,11 @@ function formatInlineMarkdown(value: string) {
 }
 
 export default function HomePage() {
+  const { user, signOut } = useAuth();
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [streamStage, setStreamStage] = useState("started");
   const [error, setError] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -85,10 +90,11 @@ export default function HomePage() {
   const drawerRef = useRef<HTMLElement>(null);
   const drawerCloseRef = useRef<HTMLButtonElement>(null);
   const drawerReturnFocusRef = useRef<HTMLElement | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const conversationIdRef = useRef(crypto.randomUUID());
 
   const activeMessage = messages.find((message) => message.id === activeMessageId && message.role === "assistant");
-  const activeEvidence = (activeMessage?.citations ?? []).map((citation) => ({ ...citation, evidenceId: `${activeMessage?.id ?? "active"}-${citation.chunk_id}` }));
-  const history = useMemo<ChatHistoryMessage[]>(() => messages.map(({ role, content }) => ({ role, content })), [messages]);
+  const activeEvidence = (activeMessage?.citations ?? []).map((citation, index) => ({ ...citation, evidenceId: `${activeMessage?.id ?? "active"}-${index}` }));
 
   useGSAP(() => {
     if (!welcomeRef.current || messages.length || typeof window === "undefined") return;
@@ -151,6 +157,8 @@ export default function HomePage() {
 
   function createNewChat() {
     if (loading) return;
+    streamAbortRef.current?.abort();
+    conversationIdRef.current = crypto.randomUUID();
     setMessages([]);
     setQuestion("");
     setError("");
@@ -180,25 +188,47 @@ export default function HomePage() {
     const message = question.trim();
     if (!message || loading) return;
     const userMessage: ChatMessage = { id: `user-${Date.now()}`, role: "user", content: message };
-    const nextHistory = [...history, { role: "user" as const, content: message }];
     setMessages((current) => [...current, userMessage]);
     setQuestion("");
     setError("");
     setLoading(true);
+    setStreamStage("started");
     setActiveMessageId(null);
     setExpandedCitationIds([]);
     setEvidenceOpen(false);
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
     try {
-      const result = await sendChatMessage(message, nextHistory);
+      const result = await sendChatMessageStream(
+        message,
+        (streamEvent) => {
+          if (streamEvent.type === "status") setStreamStage(streamEvent.stage);
+          if (streamEvent.type === "final") setStreamStage("verified");
+        },
+        {
+          conversationId: conversationIdRef.current,
+          turnId: crypto.randomUUID(),
+        },
+        controller.signal,
+      );
       setMessages((current) => [...current, { id: `assistant-${Date.now()}`, role: "assistant", content: result.response, citations: result.citations }]);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Không thể gửi câu hỏi");
+      if (!(requestError instanceof DOMException && requestError.name === "AbortError")) {
+        setError(requestError instanceof Error ? requestError.message : "Không thể gửi câu hỏi");
+      }
     } finally {
+      streamAbortRef.current = null;
       setLoading(false);
     }
   }
 
+  function cancelRequest() {
+    streamAbortRef.current?.abort();
+    setStreamStage("cancelled");
+  }
+
   return (
+    <AuthRoute>
     <main className={`bhyt-app${sidebarCollapsed ? " is-sidebar-collapsed" : ""}`}>
       <button className={`bhyt-mobile-backdrop${mobileMenuOpen ? " is-visible" : ""}`} type="button" aria-label="Đóng menu" tabIndex={mobileMenuOpen ? 0 : -1} onClick={() => setMobileMenuOpen(false)} />
 
@@ -218,8 +248,15 @@ export default function HomePage() {
         </nav>
 
         <div className="bhyt-sidebar-footer">
+          {user ? (
+            <div className="bhyt-user-info">
+              {user.photoURL ? <Image src={user.photoURL} alt="" width={32} height={32} unoptimized className="bhyt-user-avatar" /> : <Icon name="user" />}
+              <span><strong>{user.displayName || user.email}</strong><small>{user.role === "admin" ? "Quản trị viên" : "Người dùng"}</small></span>
+              <button type="button" className="bhyt-logout-btn" onClick={() => signOut()} title="Đăng xuất"><Icon name="logout" /></button>
+            </div>
+          ) : null}
           <div className="bhyt-support-note"><Icon name="shield" /><span><strong>Hỗ trợ tra cứu BHYT</strong><small>Thông tin được đối chiếu từ nguồn pháp lý</small></span></div>
-          <a className="bhyt-admin-link" href="/admin/login"><Icon name="shield" /><span>Cổng quản trị viên</span></a>
+          {user?.role === "admin" ? <a className="bhyt-admin-link" href="/admin/review"><Icon name="shield" /><span>Cổng quản trị viên</span></a> : null}
         </div>
       </aside>
 
@@ -252,7 +289,7 @@ export default function HomePage() {
               ) : (
                 <AssistantMessage key={message.id} message={message} evidenceDrawerOpen={evidenceOpen && activeMessageId === message.id} onEvidenceToggle={toggleEvidenceDrawer} />
               ))}
-              {loading ? <LoadingMessage /> : null}
+              {loading ? <LoadingMessage stage={streamStage} onCancel={cancelRequest} /> : null}
               {error ? <div className="bhyt-error" role="alert">{error}</div> : null}
               {!loading && messages.some((message) => message.role === "assistant") ? (
                 <section className="bhyt-follow-up" aria-labelledby="follow-up-title">
@@ -268,7 +305,7 @@ export default function HomePage() {
           <Icon name="search" />
           <input ref={inputRef} aria-label="Nhập câu hỏi về bảo hiểm y tế" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Hỏi về quyền lợi, mức đóng hoặc thủ tục BHYT..." disabled={loading} />
           <span className="bhyt-composer-hint">Enter</span>
-          <button type="submit" aria-label="Gửi câu hỏi" disabled={loading || !question.trim()}>{loading ? "Đang tra cứu" : "Gửi câu hỏi"}<Icon name="arrow" /></button>
+          <button type={loading ? "button" : "submit"} aria-label={loading ? "Hủy tra cứu" : "Gửi câu hỏi"} onClick={loading ? cancelRequest : undefined} disabled={!loading && !question.trim()}>{loading ? "Hủy" : "Gửi câu hỏi"}<Icon name={loading ? "close" : "arrow"} /></button>
         </form>
       </section>
 
@@ -288,6 +325,7 @@ export default function HomePage() {
         </> : null}
       </aside>
     </main>
+    </AuthRoute>
   );
 }
 
@@ -375,8 +413,18 @@ function AssistantMessage({ message, evidenceDrawerOpen, onEvidenceToggle }: { m
   );
 }
 
-function LoadingMessage() {
-  return <div className="bhyt-message-row is-assistant"><span className="bhyt-assistant-avatar" aria-hidden="true"><Icon name="spark" /></span><div className="bhyt-assistant-message"><div className="bhyt-message-meta"><strong>Trợ lý BHYT</strong><span>Đang tra cứu</span></div><div className="bhyt-typing"><span /><span /><span /><p>Đang đối chiếu văn bản và quan hệ pháp lý...</p></div></div></div>;
+function LoadingMessage({ stage, onCancel }: { stage: string; onCancel: () => void }) {
+  const labels: Record<string, string> = {
+    started: "Đang khởi động truy vấn...",
+    retrieve_vectors: "Đang tìm văn bản liên quan...",
+    assemble_context: "Đang tổng hợp căn cứ...",
+    verify_evidence: "Đang kiểm tra nguồn...",
+    generate: "Đang soạn câu trả lời...",
+    guardrail: "Đang kiểm tra độ chính xác...",
+    verified: "Đã kiểm chứng câu trả lời.",
+    cancelled: "Đã hủy truy vấn.",
+  };
+  return <div className="bhyt-message-row is-assistant"><span className="bhyt-assistant-avatar" aria-hidden="true"><Icon name="spark" /></span><div className="bhyt-assistant-message"><div className="bhyt-message-meta"><strong>Trợ lý BHYT</strong><span>Đang tra cứu</span></div><div className="bhyt-typing"><span /><span /><span /><p>{labels[stage] ?? labels.started}</p><button type="button" onClick={onCancel}>Hủy</button></div></div></div>;
 }
 
 function CitationCard({ citation, expanded, onToggle }: { citation: ChatCitation & { evidenceId: string }; expanded: boolean; onToggle: () => void }) {
@@ -384,10 +432,10 @@ function CitationCard({ citation, expanded, onToggle }: { citation: ChatCitation
     <article className={`bhyt-evidence-card${expanded ? " is-expanded" : ""}`}>
       <button type="button" onClick={onToggle} aria-expanded={expanded} aria-controls={`evidence-${citation.evidenceId}`}>
         <span className="bhyt-evidence-icon"><Icon name="document" /></span>
-        <span className="bhyt-evidence-copy"><small>Nguồn pháp lý</small><strong>{citation.title || citation.document_id}</strong><span>{citation.quote}</span></span>
+        <span className="bhyt-evidence-copy"><small>{citation.document_number || "Nguồn pháp lý"}</small><strong>{citation.title || "Văn bản nguồn"}</strong><span>{citation.quote}</span></span>
         <span className="bhyt-evidence-chevron"><Icon name="chevron" /></span>
       </button>
-      {expanded ? <div className="bhyt-evidence-content" id={`evidence-${citation.evidenceId}`}><p>{citation.quote}</p>{citation.section_title ? <strong>{citation.section_title}</strong> : null}<div>{[citation.chunk_id, ...citation.channels].map((tag) => <span key={tag}>{tag}</span>)}</div></div> : null}
+      {expanded ? <div className="bhyt-evidence-content" id={`evidence-${citation.evidenceId}`}><p>{citation.quote}</p>{citation.section_title ? <strong>{citation.section_title}</strong> : null}{citation.source_url ? <a href={citation.source_url} target="_blank" rel="noreferrer">Mở nguồn chính thức</a> : null}</div> : null}
     </article>
   );
 }
@@ -403,12 +451,14 @@ function Icon({ name }: { name: IconName }) {
     document: <><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5M9 12h6M9 16h6"/></>,
     help: <><circle cx="12" cy="12" r="9"/><path d="M9.7 9a2.5 2.5 0 1 1 3.4 2.3c-.8.4-1.1.9-1.1 1.7M12 17h.01"/></>,
     history: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></>,
+    logout: <><path d="M10 5H5v14h5M14 8l4 4-4 4M8 12h10"/></>,
     menu: <><path d="M4 7h16M4 12h16M4 17h16"/></>,
     new: <><path d="M12 5v14M5 12h14"/></>,
     review: <><path d="M5 3h14v18H5z"/><path d="M9 8h6M9 12h6M9 16h4"/></>,
     search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></>,
     shield: <><path d="M12 2 20 5v6c0 5-3.4 9-8 11-4.6-2-8-6-8-11V5z"/><path d="m9 12 2 2 4-5"/></>,
     spark: <><path d="M12 2c.6 5 2 7.4 7 8-5 .6-6.4 3-7 8-.6-5-2-7.4-7-8 5-.6 6.4-3 7-8Z"/><path d="M19 16c.2 1.7.8 2.8 2.5 3-1.7.2-2.3 1.3-2.5 3-.2-1.7-.8-2.8-2.5-3 1.7-.2 2.3-1.3 2.5-3Z"/></>,
+    user: <><circle cx="12" cy="8" r="3"/><path d="M5 21a7 7 0 0 1 14 0"/></>,
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }

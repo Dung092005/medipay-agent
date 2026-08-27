@@ -13,7 +13,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-
 PAGE_INDEX_VERSION = "legal-page-index-v2"
 
 

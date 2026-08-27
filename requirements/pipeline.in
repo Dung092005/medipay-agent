@@ -1,0 +1,8 @@
+# Offline corpus build/release/evaluation dependencies.
+python-dotenv>=1.0.0,<2
+openai>=2.26.0,<3
+psycopg[binary]>=3.2,<4
+neo4j>=5.28.0,<6
+qdrant-client==1.19.0
+numpy>=1.26,<3
+uvicorn[standard]>=0.30,<1

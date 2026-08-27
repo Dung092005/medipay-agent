@@ -1,20 +1,12 @@
 #!/bin/bash
-# Setup script cho MediPay Agent
+# Legacy wrapper; the Makefile is the canonical setup entrypoint.
 
 set -e
 
-echo "=== MediPay Agent Setup ==="
+echo "=== Team Vin Genius setup ==="
 
-# Check Python version
-python3 -c "import sys; assert sys.version_info >= (3, 11), 'Python 3.11+ required'"
-echo "Python version OK"
-
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
+command -v make >/dev/null || { echo "make is required"; exit 2; }
+make setup
 
 # Create .env if not exists
 if [ ! -f .env ]; then
@@ -22,7 +14,4 @@ if [ ! -f .env ]; then
     echo "Created .env — please edit with your API keys"
 fi
 
-# Create data directories
-mkdir -p data/chroma
-
-echo "Setup complete! Run: uvicorn src.main:app --reload"
+echo "Setup complete. Run: make dev"

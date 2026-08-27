@@ -1,0 +1,20 @@
+# Online FastAPI/GraphRAG runtime only. Keep offline corpus and test tooling out
+# of the production image; compile this file for the Python 3.11 lock.
+fastapi>=0.115.0,<1
+uvicorn[standard]>=0.34.0,<1
+pydantic>=2.10.0,<3
+pydantic-settings>=2.7.0,<3
+python-dotenv>=1.0.0,<2
+firebase-admin>=6.5.0,<8
+langchain>=0.3.0,<2
+langchain-openai>=1.1.14,<2
+langchain-text-splitters>=0.3.0,<2
+langgraph>=0.2.0,<2
+langfuse>=3.6.0,<5
+sqlalchemy>=2.0.36,<3
+asyncpg>=0.30.0,<1
+neo4j>=5.28.0,<6
+openai>=2.26.0,<3
+qdrant-client==1.19.0
+redis>=5.0.0,<6
+tiktoken>=0.7.0,<1

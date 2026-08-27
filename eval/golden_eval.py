@@ -55,6 +55,15 @@ QUALITY_WEIGHTS = {
 }
 
 
+def select_ragas_cases(
+    cases: list[dict[str, Any]],
+    case_origins: tuple[str, ...] = ("source_derived",),
+) -> list[dict[str, Any]]:
+    """Select only case origins intended for reference-based Ragas scoring."""
+    allowed = set(case_origins)
+    return [case for case in cases if case.get("case_origin") in allowed]
+
+
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -748,6 +757,19 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in handle if line.strip()]
 
 
+def write_actual_answers_checkpoint(
+    output_path: Path,
+    records: list[dict[str, Any]],
+) -> None:
+    """Persist actual-answer records so long live runs can be resumed/inspected."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = output_path.with_name(f".{output_path.name}.tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            handle.write(_canonical_json(record) + "\n")
+    os.replace(temporary_path, output_path)
+
+
 def validate_dataset(dataset_path: Path) -> dict[str, Any]:
     errors: list[str] = []
     try:
@@ -794,6 +816,7 @@ def _run_id() -> str:
 
 def generate_actual_answers(dataset_path: Path, output_path: Path, run_id: str) -> dict[str, Any]:
     cases = _load_jsonl(dataset_path)
+    write_actual_answers_checkpoint(output_path, [])
     mode = os.getenv("EVAL_AGENT_MODE", "").casefold()
     isolated = mode in {"isolated", "read_only"}
     model_configured = bool(os.getenv("MODEL_NAME") or os.getenv("EVAL_MODEL_NAME"))
@@ -911,16 +934,14 @@ def generate_actual_answers(dataset_path: Path, output_path: Path, run_id: str) 
                             "redaction_applied": True,
                         }
                     )
+                write_actual_answers_checkpoint(output_path, records)
                 print(
                     f"[AGENT {len(records)}/{len(cases)}] {case['case_id']} — {records[-1]['status']}",
                     flush=True,
                 )
 
         asyncio.run(run_all())
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="\n") as handle:
-        for record in records:
-            handle.write(_canonical_json(record) + "\n")
+    write_actual_answers_checkpoint(output_path, records)
     return {
         "total": len(records),
         "completed": sum(record["status"] == "completed" for record in records),
@@ -956,6 +977,7 @@ def score_ragas_answers(
     evaluator_model: str = "gpt-4o-mini",
     embedding_model: str = "text-embedding-3-small",
     concurrency: int = 3,
+    case_origins: tuple[str, ...] = ("source_derived",),
 ) -> dict[str, Any]:
     """Run official RAGAS metrics. This function is executed by the isolated RAGAS interpreter."""
     try:
@@ -993,7 +1015,7 @@ def score_ragas_answers(
         "context_precision": LLMContextPrecisionWithReference(llm=evaluator_llm),
         "context_recall": LLMContextRecall(llm=evaluator_llm),
     }
-    source_cases = [case for case in cases.values() if case.get("case_origin") == "source_derived"]
+    source_cases = select_ragas_cases(list(cases.values()), case_origins)
     records: list[dict[str, Any]] = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

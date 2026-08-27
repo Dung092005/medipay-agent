@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import tempfile
 import unittest
-from pathlib import Path
 
 from data_pipeline.tables import TABLE_EXTRACTION_VERSION, extract_html_tables, write_dataset_table_csv
 
@@ -57,6 +56,15 @@ class TableExtractionTest(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 6)
             self.assertEqual(rows[-1]["document_id"], "doc-a")
+
+    def test_recognizes_conservative_td_header_rows(self) -> None:
+        html = """<table>
+        <tr><td>TT</td><td>Nội dung</td><td>Mức thu</td></tr>
+        <tr><td>1</td><td>Khám lâm sàng</td><td>10.000</td></tr>
+        </table>"""
+        table = extract_html_tables("doc-c", html)[0]
+        data = [row for row in table.records if row["row_index"] == 2]
+        self.assertEqual([row["header"] for row in data], ["TT", "Nội dung", "Mức thu"])
 
 
 if __name__ == "__main__":

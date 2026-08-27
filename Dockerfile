@@ -1,36 +1,43 @@
+# syntax=docker/dockerfile:1
 # ---- Stage 1: Build ----
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim-bookworm AS builder
 
 WORKDIR /app
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+COPY requirements/runtime.lock .
+RUN python -m venv "${VIRTUAL_ENV}" \
+    && pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir --require-hashes -r runtime.lock \
+    && rm -rf "${VIRTUAL_ENV}/bin"/pip* "${VIRTUAL_ENV}/bin"/easy_install* \
+        "${VIRTUAL_ENV}/lib/python3.11/site-packages"/pip* \
+        "${VIRTUAL_ENV}/lib/python3.11/site-packages"/setuptools* \
+        "${VIRTUAL_ENV}/lib/python3.11/site-packages"/wheel*
 
 # ---- Stage 2: Production ----
-FROM python:3.11-slim
+# Distroless has no shell/package manager and currently carries no Scout CVEs;
+# the builder remains a normal Python image for deterministic wheel installs.
+FROM gcr.io/distroless/python3-debian12:nonroot
 
 WORKDIR /app
+ENV PYTHONPATH="/opt/venv/lib/python3.11/site-packages" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp
 
-# Copy installed packages from builder
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+COPY --from=builder --chown=65532:65532 \
+    /opt/venv/lib/python3.11/site-packages /opt/venv/lib/python3.11/site-packages
 
-# Security: run as non-root user
-RUN useradd -m appuser
-
-# Copy application code
-COPY . .
-
-# Create data directory with correct ownership
-RUN mkdir -p /app/data && chown -R appuser:appuser /app
-
-USER appuser
+# Copy only online runtime code; corpus/eval/frontend are separate artifacts.
+COPY --chown=65532:65532 src ./src
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+    CMD ["/usr/bin/python3.11", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT', '8000') + '/health', timeout=5)"]
 
 # Supabase schema is applied separately through Supabase SQL migrations.
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/usr/bin/python3.11"]
+CMD ["-m", "src.runtime_entrypoint"]

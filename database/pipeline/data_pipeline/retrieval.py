@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Sequence
 from enum import StrEnum
-from typing import Iterable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,7 +20,6 @@ class RetrievalChannel(StrEnum):
     LEXICAL = "lexical"
     SEMANTIC = "semantic"
     LEGAL_GRAPH = "legal_graph"
-    COMMUNITY = "community"
 
 
 class QueryPlan(BaseModel):
@@ -34,10 +33,14 @@ class QueryPlan(BaseModel):
     reference_date: str | None = None
     jurisdiction: str | None = None
     subqueries: list[str] = Field(default_factory=list, max_length=4)
-    channels: list[RetrievalChannel] = Field(default_factory=lambda: [
-        RetrievalChannel.EXACT, RetrievalChannel.LEXICAL,
-        RetrievalChannel.SEMANTIC, RetrievalChannel.LEGAL_GRAPH,
-    ])
+    channels: list[RetrievalChannel] = Field(
+        default_factory=lambda: [
+            RetrievalChannel.EXACT,
+            RetrievalChannel.LEXICAL,
+            RetrievalChannel.SEMANTIC,
+            RetrievalChannel.LEGAL_GRAPH,
+        ]
+    )
     planner_version: str = "query-planner-v1"
 
 
@@ -91,7 +94,9 @@ def build_query_plan(
 
 
 def reciprocal_rank_fusion(
-    channel_hits: dict[RetrievalChannel, Sequence[EvidenceHit]], *, k: int = 60,
+    channel_hits: dict[RetrievalChannel, Sequence[EvidenceHit]],
+    *,
+    k: int = 60,
 ) -> list[EvidenceHit]:
     """Fuse channels while retaining per-channel score and citation provenance."""
 

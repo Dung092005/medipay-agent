@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from pathlib import Path
 
 from data_pipeline.canonical import CanonicalSnapshot
 from data_pipeline.page_index_export import export_page_index
@@ -14,7 +13,7 @@ class PageIndexExportTest(unittest.TestCase):
         snapshot = CanonicalSnapshot(
             dataset_id="snapshot-test",
             manifest={"source_manifest_sha256": "source-hash", "legal_unit_version": "v1"},
-            documents=(), content=(), categories=(), relationships=(), passages=(), validation_issues=(),
+            documents=(), content=(), categories=(), relationships=(), passages=(), aliases=(), validation_issues=(),
             legal_units=(
                 {"unit_id": "root", "parent_unit_id": "", "document_id": "doc", "unit_type": "document"},
                 {"unit_id": "article", "parent_unit_id": "root", "document_id": "doc", "unit_type": "article"},

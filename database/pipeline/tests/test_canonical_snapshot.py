@@ -59,6 +59,19 @@ class CanonicalSnapshotTest(unittest.TestCase):
             with self.assertRaises(SnapshotValidationError):
                 build_snapshot(path)
 
+    def test_declared_content_hashes_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            self.source(path)
+            self.write(
+                path,
+                "content.csv",
+                ["id", "content_html", "content_html_sha256"],
+                [{"id": "1", "content_html": "<p>Nội dung</p>", "content_html_sha256": "0" * 64}],
+            )
+            with self.assertRaisesRegex(SnapshotValidationError, "raw HTML hash mismatch"):
+                build_snapshot(path)
+
     def test_markup_without_visible_text_is_not_available_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)
@@ -67,6 +80,29 @@ class CanonicalSnapshotTest(unittest.TestCase):
             snapshot = build_snapshot(path)
             self.assertEqual(snapshot.content[0]["normalized_text"], "")
             self.assertFalse(snapshot.content[0]["content_available"])
+
+    def test_aliases_and_retrieval_eligibility_are_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            self.source(path)
+            self.write(
+                path,
+                "metadata.csv",
+                ["id", "title", "agent_category", "index_eligible", "semantic_eligible"],
+                [{"id": "1", "title": "Luật A", "agent_category": "bhyt", "index_eligible": "false", "semantic_eligible": "false"}],
+            )
+            self.write(
+                path,
+                "aliases.csv",
+                ["alias_document_id", "canonical_document_id", "alias_type"],
+                [{"alias_document_id": "old-1", "canonical_document_id": "1", "alias_type": "duplicate"}],
+            )
+            snapshot = build_snapshot(path)
+            self.assertEqual(snapshot.aliases[0]["alias_document_id"], "old-1")
+            self.assertEqual(snapshot.manifest["counts"]["index_eligible_documents"], 0)
+            self.assertEqual(snapshot.passages, ())
+            self.assertEqual(snapshot.legal_units, ())
+            self.assertTrue(snapshot.content[0]["content_available"])
 
 
 if __name__ == "__main__":

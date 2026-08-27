@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from src.db.repositories import GraphRepository
 from src.integrations.embeddings import EmbeddingModel
 from src.models.graph import Entity, Relation, RetrievalResult
@@ -14,9 +16,11 @@ async def retrieve_graph_context(
     hops: int,
     neighbor_limit: int,
 ) -> tuple[list[RetrievalResult], list[Relation]]:
-    vector = await embeddings.embed_query(query)
-    chunks = await repository.search_vectors(vector, limit=top_k)
-    relations = await repository.expand_entities(
-        [entity.name for entity in entities], hops=hops, limit=neighbor_limit
+    warnings.warn(
+        "src.graph_rag.retrieval is retired; use GraphRagRuntime.retrieve instead",
+        DeprecationWarning,
+        stacklevel=2,
     )
-    return chunks, relations
+    from src.services.chat import get_runtime
+
+    return await get_runtime().retrieve(query)

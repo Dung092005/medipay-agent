@@ -15,7 +15,7 @@ table source spans, chunks and relationship predicates.
 |---|---|---|
 | Documents and source HTML | Supabase PostgreSQL | Release-scoped, immutable after staging |
 | Lexical retrieval | PostgreSQL | `search_vector` and active views |
-| Semantic retrieval | Supabase pgvector | `extensions.vector(1536)`; cosine/HNSW |
+| Semantic retrieval | Qdrant | `medical_legal_active` alias → versioned cosine collection |
 | Legal document graph | Neo4j | Directed edges from `relationships.csv` |
 | Authentication client | Firebase | Frontend public config only |
 
@@ -26,8 +26,8 @@ Treat retrieval as four evidence channels, not as one generic vector search:
 1. **Exact**: match document title and `so_ky_hieu` for high precision.
 2. **Lexical**: query `chunks.search_vector` with PostgreSQL full-text search
    and deterministic `ts_rank_cd` ordering.
-3. **Semantic**: embed the question with `text-embedding-3-small`, then use
-   pgvector cosine distance over the active release.
+3. **Semantic**: embed the question with `text-embedding-3-small`, then query
+   Qdrant with the active `dataset_id` and `answer_ready=true` payload filter.
 4. **Legal graph**: use document IDs from the first three channels as seeds,
    traverse bounded directed edges in Neo4j, then fetch target chunk evidence
    from Supabase.
@@ -38,10 +38,10 @@ legal-unit structure persisted in `legal_units`. It supplies hierarchy,
 ordinal, parent, source offsets and citation boundaries. It is not a ranking
 channel and must not be replaced by arbitrary text splitting.
 
-Use two physical stores and three retrieval indexes: Supabase PostgreSQL/pgvector
-contains lexical, vector and PageIndex/legal-unit data; Neo4j Aura contains the
-directed graph. PageIndex artifacts are build outputs, while `legal_units` in
-Supabase is the runtime source for hierarchy and spans.
+Use three physical stores: Supabase contains canonical text, lexical and
+PageIndex/legal-unit data; Qdrant contains derived vectors; Neo4j Aura contains
+the directed graph. PageIndex artifacts are build outputs, while `legal_units`
+in Supabase is the runtime source for hierarchy and spans.
 
 ```text
 query
@@ -87,10 +87,10 @@ from an LLM-generated graph fact.
 
 1. Build deterministic artifacts from `data/raw`.
 2. Stage documents/chunks/tables in Supabase.
-3. Embed every non-empty chunk.
-4. Validate provenance and vector completeness.
-5. Atomically publish the release.
-6. Import the same `dataset_id` into Neo4j.
+3. Embed only semantic-eligible passages and preserve the local artifact.
+4. Upload a versioned Qdrant collection; verify every passage ID/input hash.
+5. Move `medical_legal_active` alias atomically only after Qdrant parity.
+6. Import the same `dataset_id` into Neo4j and publish/cut over the release.
 
 If any step fails, leave the previous active release untouched. Never mark a
 release active by bypassing vector validation except for an explicitly named
@@ -124,7 +124,7 @@ separate backend auth task explicitly requires it.
 ## Safe change procedure
 
 - Inspect `git status` first and preserve unrelated user changes.
-- Prefer `database/schema.sql` and the pipeline modules over new ad-hoc SQL.
+- Prefer `database/postgres/schema.sql` and the pipeline modules over new ad-hoc SQL.
 - Keep all SQL release-scoped by `dataset_id`.
 - Keep API routes free of direct SQL, embedding calls and graph orchestration.
 - Update `README-DEV.md`, this contract and `.env.example` when a boundary or

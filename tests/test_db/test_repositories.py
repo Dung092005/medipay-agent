@@ -37,3 +37,25 @@ async def test_search_vectors_restricts_query_to_semantic_eligible_chunks():
         "limit": 10,
         "similarity_threshold": 0.25,
     }
+
+
+@pytest.mark.asyncio
+async def test_search_lexical_uses_active_release_full_text_index():
+    session = CaptureSession()
+    repository = GraphRepository(session)
+
+    result = await repository.search_lexical(
+        "Thông tư 01",
+        limit=10,
+        dataset_id="dataset-1",
+    )
+
+    assert result == []
+    sql = str(session.statement)
+    assert "c.search_vector @@ plainto_tsquery('simple', :query)" in sql
+    assert "c.dataset_id = :dataset_id" in sql
+    assert session.parameters == {
+        "query": "Thông tư 01",
+        "dataset_id": "dataset-1",
+        "limit": 10,
+    }

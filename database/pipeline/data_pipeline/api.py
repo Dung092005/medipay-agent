@@ -28,9 +28,8 @@ from data_pipeline.api_models import (
     DatasetInfo,
     DocumentResponse,
     ErrorResponse,
-    LegalUnitResponse,
-    TableResponse,
     HealthResponse,
+    LegalUnitResponse,
     RelationshipDirection,
     RelationshipResponse,
     RetrieveHit,
@@ -39,11 +38,11 @@ from data_pipeline.api_models import (
     SearchRequest,
     SearchResponse,
     StatsResponse,
+    TableResponse,
 )
 from data_pipeline.api_repository import PsycopgReadRepository, ReadRepository
 from data_pipeline.embedding import embed_query
 from data_pipeline.retrieval import EvidenceHit, RetrievalChannel, build_query_plan, reciprocal_rank_fusion
-
 
 LOGGER = logging.getLogger("data_pipeline.api")
 
@@ -64,7 +63,7 @@ class LazyGraphEmbeddingProvider:
             return embed_query(query)
 
 
-class ApiProblem(Exception):
+class ApiProblem(Exception):  # noqa: N818 - API error code is a public contract
     def __init__(self, status_code: int, code: str, message: str) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -120,43 +119,71 @@ class ReadApiService:
         channels: dict[RetrievalChannel, list[EvidenceHit]] = {}
         warnings: list[str] = []
         exact_search = getattr(self.repository, "exact_search", None)
-        exact_page = exact_search(request.query, category=request.category, status=request.status, limit=request.limit) if exact_search else None
+        exact_page = (
+            exact_search(request.query, category=request.category, status=request.status, limit=request.limit)
+            if exact_search
+            else None
+        )
         if exact_page and exact_page.hits:
             channels[RetrievalChannel.EXACT] = [
                 EvidenceHit(
-                    evidence_id=hit.chunk_id, document_id=hit.document_id,
-                    passage_id=hit.chunk_id, unit_id=hit.unit_id, text=hit.text,
-                    channel=RetrievalChannel.EXACT, score=hit.score, rank=index,
+                    evidence_id=hit.chunk_id,
+                    document_id=hit.document_id,
+                    passage_id=hit.chunk_id,
+                    unit_id=hit.unit_id,
+                    text=hit.text,
+                    channel=RetrievalChannel.EXACT,
+                    score=hit.score,
+                    rank=index,
                     citation={"title": hit.title, **hit.citation},
-                ) for index, hit in enumerate(exact_page.hits, start=1)
+                )
+                for index, hit in enumerate(exact_page.hits, start=1)
             ]
         lexical_search = getattr(self.repository, "lexical_search", None)
-        lexical_page = lexical_search(request.query, category=request.category, status=request.status, limit=request.limit) if lexical_search else None
+        lexical_page = (
+            lexical_search(request.query, category=request.category, status=request.status, limit=request.limit)
+            if lexical_search
+            else None
+        )
         if lexical_page and lexical_page.hits:
             channels[RetrievalChannel.LEXICAL] = [
                 EvidenceHit(
-                    evidence_id=hit.chunk_id, document_id=hit.document_id,
-                    passage_id=hit.chunk_id, unit_id=hit.unit_id, text=hit.text,
-                    channel=RetrievalChannel.LEXICAL, score=hit.score, rank=index,
+                    evidence_id=hit.chunk_id,
+                    document_id=hit.document_id,
+                    passage_id=hit.chunk_id,
+                    unit_id=hit.unit_id,
+                    text=hit.text,
+                    channel=RetrievalChannel.LEXICAL,
+                    score=hit.score,
+                    rank=index,
                     citation={"title": hit.title, **hit.citation},
-                ) for index, hit in enumerate(lexical_page.hits, start=1)
+                )
+                for index, hit in enumerate(lexical_page.hits, start=1)
             ]
         else:
             warnings.append("lexical_channel_returned_no_hits")
         try:
             vector = self.embeddings.embed_query(request.query)
-            semantic_page = self.repository.search(vector, category=request.category, status=request.status, limit=request.limit)
+            semantic_page = self.repository.search(
+                vector, category=request.category, status=request.status, limit=request.limit
+            )
         except (ValueError, OSError, RuntimeError) as error:
             semantic_page = None
             warnings.append(f"semantic_channel_unavailable: {type(error).__name__}")
         if semantic_page and semantic_page.hits:
             channels[RetrievalChannel.SEMANTIC] = [
                 EvidenceHit(
-                    evidence_id=hit.chunk_id, document_id=hit.document_id,
-                    passage_id=hit.chunk_id, unit_id=hit.unit_id, text=hit.text,
-                    channel=RetrievalChannel.SEMANTIC, score=hit.score, rank=index,
+                    evidence_id=hit.chunk_id,
+                    document_id=hit.document_id,
+                    passage_id=hit.chunk_id,
+                    unit_id=hit.unit_id,
+                    text=hit.text,
+                    channel=RetrievalChannel.SEMANTIC,
+                    score=hit.score,
+                    rank=index,
                     citation={"title": hit.title, **hit.citation},
-                ) for index, hit in enumerate(semantic_page.hits, start=1)
+                )
+                for index, hit in enumerate(semantic_page.hits, start=1)
             ]
         seed_hits = [hit for page in (exact_page, lexical_page, semantic_page) if page for hit in page.hits]
         seed_ids = list(dict.fromkeys(hit.document_id for hit in seed_hits))
@@ -164,6 +191,7 @@ class ReadApiService:
         if graph_expand and seed_ids:
             graph_page = graph_expand(
                 seed_ids,
+                query=request.query,
                 limit=request.limit,
                 reference_date=request.reference_date,
                 jurisdiction=request.jurisdiction,
@@ -171,10 +199,17 @@ class ReadApiService:
             if graph_page and graph_page.hits:
                 channels[RetrievalChannel.LEGAL_GRAPH] = [
                     EvidenceHit(
-                        evidence_id=hit.chunk_id, document_id=hit.document_id, passage_id=hit.chunk_id,
-                        unit_id=hit.unit_id, text=hit.text, channel=RetrievalChannel.LEGAL_GRAPH,
-                        score=hit.score, rank=index, citation={"title": hit.title, **hit.citation},
-                    ) for index, hit in enumerate(graph_page.hits, start=1)
+                        evidence_id=hit.chunk_id,
+                        document_id=hit.document_id,
+                        passage_id=hit.chunk_id,
+                        unit_id=hit.unit_id,
+                        text=hit.text,
+                        channel=RetrievalChannel.LEGAL_GRAPH,
+                        score=hit.score,
+                        rank=index,
+                        citation={"title": hit.title, **hit.citation},
+                    )
+                    for index, hit in enumerate(graph_page.hits, start=1)
                 ]
             else:
                 warnings.append("legal_graph_channel_returned_no_hits")
@@ -184,12 +219,25 @@ class ReadApiService:
         dataset = self.repository.current_dataset()
         if dataset is None:
             raise ApiProblem(503, "dataset_not_ready", "No active dataset is available")
-        hits = [RetrieveHit(
-            evidence_id=hit.evidence_id, document_id=hit.document_id,
-            passage_id=hit.passage_id, unit_id=hit.unit_id, text=hit.text,
-            score=hit.score, channel=hit.channel.value, citation=hit.citation,
-        ) for hit in fused[: request.limit]]
-        return RetrieveResponse(dataset_version=dataset.dataset_version, query_plan=plan.model_dump(mode="json"), hits=hits, warnings=warnings)
+        hits = [
+            RetrieveHit(
+                evidence_id=hit.evidence_id,
+                document_id=hit.document_id,
+                passage_id=hit.passage_id,
+                unit_id=hit.unit_id,
+                text=hit.text,
+                score=hit.score,
+                channel=hit.channel.value,
+                citation=hit.citation,
+            )
+            for hit in fused[: request.limit]
+        ]
+        return RetrieveResponse(
+            dataset_version=dataset.dataset_version,
+            query_plan=plan.model_dump(mode="json"),
+            hits=hits,
+            warnings=warnings,
+        )
 
     def document(self, document_id: str, *, include_content: bool) -> DocumentResponse:
         document = self.repository.get_document(document_id, include_content=include_content)
@@ -275,11 +323,7 @@ def create_app(
     )
     application.state.service = service
 
-    cors_origins = [
-        origin.strip()
-        for origin in os.getenv("API_CORS_ORIGINS", "").split(",")
-        if origin.strip()
-    ]
+    cors_origins = [origin.strip() for origin in os.getenv("API_CORS_ORIGINS", "").split(",") if origin.strip()]
     if cors_origins:
         application.add_middleware(
             CORSMiddleware,

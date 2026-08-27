@@ -14,7 +14,7 @@ CSV authority
   ├── Directed document relationship graph
   ├── PageIndex structural graph
   ├── Evidence/document/unit/chunk/table links
-  └── Native RAG: exact + lexical + pgvector semantic + graph expansion
+  └── Native RAG: exact + lexical + Qdrant semantic + graph expansion
 ```
 
 ### Các graph được triển khai
@@ -36,7 +36,7 @@ Không triển khai claim/rule graph, similarity graph hoặc community graph.
 3. Parse visible HTML, legal units, tables và source provenance.
 4. Tạo retrieval chunks theo legal-unit boundary.
 5. Stage toàn bộ release vào Supabase PostgreSQL.
-6. Tạo lexical index và pgvector HNSW semantic index.
+6. Tạo lexical index và Qdrant semantic projection.
 7. Chạy retrieval smoke/provenance checks.
 8. Atomic activate release.
 
@@ -63,7 +63,7 @@ Không triển khai claim/rule graph, similarity graph hoặc community graph.
 
 - Exact: số hiệu, tiêu đề, Điều/Khoản/Điểm.
 - Lexical: PostgreSQL `tsvector`/`tsquery` và rank deterministic.
-- Semantic: OpenAI embedding + pgvector cosine.
+- Semantic: OpenAI embedding + Qdrant cosine.
 - Legal graph: seed từ evidence hit, expand directed edge depth 1, giữ edge
   provenance và áp dụng date/jurisdiction filter trước expansion.
 - Fusion: exact/lexical/semantic là evidence channels riêng; RRF chỉ xếp hạng,
@@ -73,7 +73,7 @@ Không triển khai claim/rule graph, similarity graph hoặc community graph.
 
 - bật extension `vector`;
 - dùng `vector(n)` và HNSW cosine index;
-- không phụ thuộc collection API ngoài PostgreSQL/pgvector;
+- không trộn semantic vector vào PostgreSQL; collection Qdrant có release fingerprint;
 - mọi bảng có `dataset_id` và active views;
 - API chỉ đọc active release;
 - bật RLS ở lớp triển khai nếu endpoint public.

@@ -1,0 +1,20 @@
+FROM python:3.11-slim-bookworm AS builder
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY requirements/pipeline.lock /tmp/pipeline.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/pipeline.lock \
+    && rm -rf /usr/local/bin/pip* /usr/local/bin/easy_install* \
+        /usr/local/lib/python3.11/site-packages/pip* \
+        /usr/local/lib/python3.11/site-packages/setuptools* \
+        /usr/local/lib/python3.11/site-packages/wheel*
+
+FROM gcr.io/distroless/python3-debian12:nonroot
+ENV PYTHONPATH="/usr/local/lib/python3.11/site-packages:/app/database/pipeline" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY --from=builder --chown=65532:65532 \
+    /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --chown=65532:65532 database/pipeline ./database/pipeline
+COPY --chown=65532:65532 database/corpus ./database/corpus
+ENTRYPOINT ["/usr/bin/python3.11", "-m", "uvicorn", "data_pipeline.api:app", "--host", "0.0.0.0", "--port", "8000"]

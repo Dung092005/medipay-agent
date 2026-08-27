@@ -5,9 +5,9 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Iterable, Mapping
-
+from typing import Any
 
 FACET_VERSION = "metadata-facets-v1"
 
@@ -51,7 +51,7 @@ def build_facets(snapshot: Any) -> tuple[dict[str, str], ...]:
             if key in seen:
                 continue
             seen.add(key)
-            membership_key = hashlib.sha256(f"{snapshot.dataset_id}|{facet_name}|{facet_value}|{document_id}".encode("utf-8")).hexdigest()
+            membership_key = hashlib.sha256(f"{snapshot.dataset_id}|{facet_name}|{facet_value}|{document_id}".encode()).hexdigest()
             result.append({
                 "dataset_id": snapshot.dataset_id,
                 "facet_version": FACET_VERSION,

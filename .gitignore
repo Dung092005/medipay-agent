@@ -39,6 +39,17 @@ data/*
 # Rebuildable pipeline artifacts; keep raw authority CSVs versioned.
 /data/clean/
 
+# Local corpus exports, release backups and generated audit evidence.
+/database/medical_docs_active.json
+/database/medical_relationships_active.json
+/database/backups/
+/database/audit/results/
+/database/audit/*.json
+
+# Local research inputs and generated evaluation evidence; never release inputs.
+/outsource/
+/eval/results/
+
 # Logs
 logs/
 *.log
@@ -47,6 +58,10 @@ logs/
 htmlcov/
 .coverage
 coverage.xml
+.pytest_cache/
+.ruff_cache/
+.tmp*
+*.tmp
 
 # Docker
 docker-compose.override.yml
@@ -54,6 +69,8 @@ docker-compose.override.yml
 # Node (frontend)
 node_modules/
 .next/
+*.tsbuildinfo
+web/next-env.d.ts
 out/
 .nuxt/
 
@@ -68,3 +85,6 @@ out/
 # Local project guidance and status
 /DESIGN_SKILL.md
 /local_project_status.md
+
+# One-time structure port backups
+/_structure_backup_*/

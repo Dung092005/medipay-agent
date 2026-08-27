@@ -13,14 +13,20 @@ import csv
 import hashlib
 import json
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
-
-TABLE_EXTRACTION_VERSION = "html-tables-deterministic-v1"
+TABLE_EXTRACTION_VERSION = "html-tables-deterministic-v2"
 _SPACE = re.compile(r"\s+")
+_TD_HEADER_LABEL = re.compile(
+    r"^(?:stt|tt|mã(?:\s+số)?|tên(?:\s+(?:dịch vụ|kỹ thuật|hoạt chất))?|nội dung|"
+    r"đơn vị(?:\s+tính)?|mức thu|mức giá|giá|ghi chú|tuyến|hạng(?:\s+bệnh viện)?|"
+    r"số lượng|đối tượng|chỉ tiêu|dịch vụ)$",
+    flags=re.IGNORECASE,
+)
 
 
 def _clean(value: str | None) -> str:
@@ -224,9 +230,20 @@ def _column_headers(grid: Sequence[Sequence[_Cell | None]]) -> tuple[list[str], 
     if not grid:
         return [], 0
     header_rows = 0
-    for row in grid:
+    for row in grid[:3]:
         populated = [cell for cell in row if cell is not None]
-        if populated and all(cell.tag == "th" for cell in populated):
+        labels = {_clean(cell.text).casefold() for cell in populated if _clean(cell.text)}
+        # A large part of the source corpus uses TD for visually bold header
+        # rows. Recognise only a narrow legal-table vocabulary, and stop as
+        # soon as the first column looks like a numbered data row.
+        first_value = _clean(populated[0].text) if populated else ""
+        td_header = (
+            bool(labels)
+            and not re.fullmatch(r"\d+[.)]?", first_value)
+            and sum(bool(_TD_HEADER_LABEL.fullmatch(label)) for label in labels)
+            >= max(1, min(2, len(labels) // 2))
+        )
+        if populated and (all(cell.tag == "th" for cell in populated) or td_header):
             header_rows += 1
         else:
             break

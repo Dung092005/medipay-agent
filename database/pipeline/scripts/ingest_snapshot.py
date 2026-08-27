@@ -5,9 +5,8 @@ Usage:
     python scripts/ingest_snapshot.py --source-dir data/raw
 
 Embedding is deliberately separate. The default command only stages and
-validates the passage/relationship snapshot. An embedding worker creates the
-release-scoped pgvector index and populates it before ``publish_dataset``
-makes it visible to read APIs.
+validates the passage/relationship snapshot. A Qdrant release job publishes a
+verified external embedding artifact before the release is made visible.
 """
 
 from __future__ import annotations
@@ -26,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 load_dotenv()
 
-from data_pipeline.canonical import build_snapshot
-from data_pipeline.storage import ingest_canonical_snapshot, stage_canonical_snapshot
+from data_pipeline.canonical import build_snapshot  # noqa: E402
+from data_pipeline.storage import ingest_canonical_snapshot, stage_canonical_snapshot  # noqa: E402
 
 
 def connection() -> psycopg.Connection:

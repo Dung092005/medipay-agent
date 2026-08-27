@@ -1,0 +1,59 @@
+groups:
+  - name: medipay-api-slo
+    interval: 30s
+    rules:
+      - alert: MediPayHigh5xxRate
+        expr: |
+          sum(rate(medipay_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(medipay_http_requests_total[5m])), 1) > 0.02
+        for: 10m
+        labels:
+          severity: page
+          service: medipay-api
+        annotations:
+          summary: MediPay API 5xx rate is above 2%
+          runbook: ops/runbooks/deploy.md
+
+      - alert: MediPayReadinessLatencyHigh
+        expr: medipay_http_request_duration_seconds{path="/ready",quantile="0.95"} > 0.6
+        for: 10m
+        labels:
+          severity: ticket
+          service: medipay-api
+        annotations:
+          summary: MediPay readiness p95 exceeds 600ms
+          runbook: ops/runbooks/observability.md
+
+      - alert: MediPayAnswerLatencyHigh
+        expr: medipay_http_request_duration_seconds{path=~"/api/v1/chat.*",quantile="0.95"} > 8
+        for: 15m
+        labels:
+          severity: ticket
+          service: medipay-api
+        annotations:
+          summary: MediPay chat p95 exceeds the concise-answer target
+          runbook: ops/runbooks/observability.md
+
+      - alert: MediPayProviderErrors
+        expr: |
+          sum(rate(medipay_provider_calls_total{outcome=~"error|timeout"}[5m]))
+            / clamp_min(sum(rate(medipay_provider_calls_total[5m])), 1) > 0.05
+        for: 10m
+        labels:
+          severity: page
+          service: medipay-api
+        annotations:
+          summary: External provider error/timeout rate is above 5%
+          runbook: ops/runbooks/observability.md
+
+      - alert: MediPayRetrievalErrors
+        expr: |
+          sum(rate(medipay_retrieval_requests_total{outcome=~"error|timeout"}[5m]))
+            / clamp_min(sum(rate(medipay_retrieval_requests_total[5m])), 1) > 0.02
+        for: 10m
+        labels:
+          severity: page
+          service: medipay-api
+        annotations:
+          summary: Retrieval error/timeout rate is above 2%
+          runbook: ops/runbooks/restore.md

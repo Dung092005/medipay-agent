@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import unittest
 import asyncio
-from datetime import datetime, timezone
+import unittest
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-
 from data_pipeline.api import create_app
 from data_pipeline.api_models import (
     Category,
@@ -51,7 +50,7 @@ class FakeRepository:
                 "external_document_stub_rows": 1,
                 "chunk_rows": 4,
             },
-            published_at=datetime(2026, 8, 7, tzinfo=timezone.utc),
+            published_at=datetime(2026, 8, 7, tzinfo=UTC),
         )
         self.last_search: dict[str, Any] | None = None
         self.last_relationships: dict[str, Any] | None = None
@@ -325,7 +324,16 @@ class ApiTest(unittest.TestCase):
                 "document_id": "doc-1",
                 "score": 0.8,
                 "text": "text",
-                "chunk_payload": {"section_title": "Điều 2"},
+                "chunk_payload": {
+                    "section_title": "legacy",
+                    "unit_id": "legacy-unit",
+                    "source_start": 99,
+                    "source_end": 100,
+                },
+                "section_title": "Điều 2",
+                "unit_id": "unit-2",
+                "source_start": 10,
+                "source_end": 20,
                 "title": "Title",
                 "is_external": False,
                 "node_payload": {
@@ -335,6 +343,10 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(hit.so_ky_hieu, "03/QĐ")
         self.assertEqual(hit.status, "Hết hiệu lực")
+        self.assertEqual(hit.section_title, "Điều 2")
+        self.assertEqual(hit.unit_id, "unit-2")
+        self.assertEqual(hit.source_start, 10)
+        self.assertEqual(hit.source_end, 20)
 
         relationship = _relationship_item(
             {

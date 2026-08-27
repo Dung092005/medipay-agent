@@ -393,6 +393,8 @@
 .admin-login-back svg { width: 15px; height: 15px; }
 .admin-login-notice { display: flex; align-items: flex-start; gap: 7px; margin: 20px 0 0; padding-top: 17px; border-top: 1px solid var(--admin-line); color: #94a3b8; font-size: 8px; line-height: 1.5; }
 .admin-login-notice svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.admin-login-google { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 45px; margin-top: 20px; border: 1px solid var(--admin-line); border-radius: 10px; color: var(--admin-ink); background: #ffffff; font-size: 11px; font-weight: 700; cursor: pointer; transition: background 160ms ease, box-shadow 160ms ease; }
+.admin-login-google:hover { background: #f8fafc; box-shadow: 0 4px 12px rgba(15, 23, 42, .08); }
 .admin-login-toast { position: fixed; top: 22px; right: 22px; display: flex; align-items: center; gap: 10px; padding: 11px 13px; border: 1px solid #6ee7b7; border-radius: 11px; color: #047857; background: #ecfdf5; box-shadow: 0 14px 34px rgba(15, 23, 42, .12); }
 .admin-login-toast > svg { width: 19px; height: 19px; }
 .admin-login-toast > span { display: grid; }

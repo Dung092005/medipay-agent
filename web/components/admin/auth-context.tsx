@@ -1,81 +1,56 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from "react";
-
-const ADMIN_SESSION_KEY = "bhyt-admin-session";
-const ADMIN_SESSION_VALUE = "mock-admin-authenticated";
-const AUTH_EVENT = "bhyt-admin-auth-change";
+import { createContext, useCallback, useContext, useMemo } from "react";
+import { useAuth } from "../../lib/auth-context";
 
 type LoginResult = { success: true } | { success: false; message: string };
 
 type AdminAuthContextValue = {
   isAuthenticated: boolean;
   isReady: boolean;
+  isAdmin: boolean;
+  signInWithGoogle: () => Promise<void>;
   login: (username: string, password: string) => LoginResult;
   logout: () => void;
+  user: { email: string; displayName: string; photoURL: string | null } | null;
 };
 
 const AdminAuthContext = createContext<AdminAuthContextValue | null>(null);
 
-function subscribeToAuth(onStoreChange: () => void) {
-  window.addEventListener("storage", onStoreChange);
-  window.addEventListener(AUTH_EVENT, onStoreChange);
-  return () => {
-    window.removeEventListener("storage", onStoreChange);
-    window.removeEventListener(AUTH_EVENT, onStoreChange);
-  };
-}
-
-function getAuthSnapshot() {
-  return window.localStorage.getItem(ADMIN_SESSION_KEY) === ADMIN_SESSION_VALUE;
-}
-
-function getServerAuthSnapshot() {
-  return false;
-}
-
-function subscribeToHydration() {
-  return () => undefined;
-}
-
-function getClientHydrationSnapshot() {
-  return true;
-}
-
-function getServerHydrationSnapshot() {
-  return false;
-}
-
-function notifyAuthChange() {
-  window.dispatchEvent(new Event(AUTH_EVENT));
-}
-
 export function AdminAuthProvider({ children }: { children: React.ReactNode }) {
-  const isAuthenticated = useSyncExternalStore(subscribeToAuth, getAuthSnapshot, getServerAuthSnapshot);
-  const isReady = useSyncExternalStore(subscribeToHydration, getClientHydrationSnapshot, getServerHydrationSnapshot);
+  const { user, loading, signInWithGoogle, signOut, isAdmin } = useAuth();
+
+  const isAuthenticated = !loading && !!user;
+  const isReady = !loading;
 
   const login = useCallback((username: string, password: string): LoginResult => {
-    if (username.trim() !== "admin" || password !== "admin") {
-      return { success: false, message: "Tài khoản hoặc mật khẩu không chính xác." };
-    }
-
-    window.localStorage.setItem(ADMIN_SESSION_KEY, ADMIN_SESSION_VALUE);
-    notifyAuthChange();
-    return { success: true };
+    void username;
+    void password;
+    return { success: false, message: "Vui lòng đăng nhập bằng tài khoản Google." };
   }, []);
 
   const logout = useCallback(() => {
-    window.localStorage.removeItem(ADMIN_SESSION_KEY);
-    notifyAuthChange();
-  }, []);
+    signOut();
+  }, [signOut]);
 
-  const value = useMemo(() => ({ isAuthenticated, isReady, login, logout }), [isAuthenticated, isReady, login, logout]);
+  const value = useMemo(
+    () => ({
+      isAuthenticated,
+      isReady,
+      isAdmin,
+      signInWithGoogle,
+      login,
+      logout,
+      user: user ? { email: user.email, displayName: user.displayName, photoURL: user.photoURL } : null,
+    }),
+    [isAuthenticated, isReady, isAdmin, signInWithGoogle, login, logout, user]
+  );
 
   return <AdminAuthContext.Provider value={value}>{children}</AdminAuthContext.Provider>;
 }
 
 export function useAdminAuth() {
   const context = useContext(AdminAuthContext);
-  if (!context) throw new Error("useAdminAuth phải được dùng bên trong AdminAuthProvider.");
+  if (!context) throw new Error("useAdminAuth must be used inside AdminAuthProvider.");
   return context;
 }

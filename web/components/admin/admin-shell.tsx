@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
-import { useAdminAuth } from "./auth-context";
+import { useAuth } from "../../lib/auth-context";
 import { useReviewQueue } from "./review-context";
 
 type AdminIconName = "archive" | "chevron" | "graph" | "logout" | "queue" | "settings" | "shield" | "user";
@@ -17,12 +17,12 @@ const unavailableModules: { label: string; description: string; icon: AdminIconN
 export function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { logout } = useAdminAuth();
+  const { user, signOut } = useAuth();
   const { pendingCount, selectedReview } = useReviewQueue();
 
   function handleLogout() {
-    logout();
-    router.replace("/admin/login");
+    signOut();
+    router.replace("/login");
   }
 
   const recordLabel = selectedReview?.domain === "hospital_fee_ocr"
@@ -65,7 +65,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
           </nav>
           <div className="admin-shell-header-actions">
             <span className="admin-dataset-tag">Local Dataset v0.1</span>
-            <div className="admin-profile"><span><AdminIcon name="user" /></span><div><strong>Quản trị viên</strong><small>Admin</small></div></div>
+            <div className="admin-profile"><span><AdminIcon name="user" /></span><div><strong>{user?.displayName || "Quản trị viên"}</strong><small>{user?.email || "Admin"}</small></div></div>
             <button className="admin-header-logout" type="button" onClick={handleLogout}><AdminIcon name="logout" /><span>Đăng xuất</span></button>
           </div>
         </header>

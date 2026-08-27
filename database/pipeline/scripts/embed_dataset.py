@@ -13,7 +13,8 @@ import psycopg
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 from data_pipeline.embedding import PREPROCESSOR, dimensions, embed_batch, model_name
 from data_pipeline.storage import ensure_dataset_vector_collection, publish_dataset
