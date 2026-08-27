@@ -17,9 +17,27 @@ export type ChatCitation = {
   source_checked_at: string;
 };
 
+export type AnswerClaim = {
+  claim_id: string;
+  text: string;
+  claim_type: "document" | "status" | "entitlement" | "condition" | "procedure" | "exception" | "general";
+  subject: string;
+  condition: string;
+  entitlement: string;
+  exception: string;
+  procedure: string;
+  effective_from: string;
+  evidence_ids: string[];
+  source_spans: Array<Array<number | null>>;
+  source_hashes: string[];
+  verification: "entailed" | "partial" | "unsupported";
+  reason: string;
+};
+
 export type ChatResponse = {
   response: string;
   citations: ChatCitation[];
+  claims?: AnswerClaim[];
 };
 
 export type ReviewQueueItem = {
