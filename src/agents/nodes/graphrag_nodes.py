@@ -241,75 +241,7 @@ async def generate_node(state: AgentState) -> dict:
     evidence: list[RetrievalResult] = state.get("retrieved_evidence", [])
     if not evidence:
         return {"response": no_answer_response(state.get("query", ""))}
-    if (
-        requires_evidence_verification(state.get("query", ""))
-        and "học sinh" in state.get("query", "").casefold()
-        and "hỗ trợ" in state.get("query", "").casefold()
-    ):
-        return {
-            "response": (
-                "- Năm 2026: học sinh thuộc nhóm được Nhà nước hỗ trợ mức đóng BHYT.\n"
-                "- Mức đóng hoặc điều kiện xác định mức đóng được đối chiếu theo mức tham chiếu; "
-                "nguồn hiện có chưa đủ để tính số tiền cụ thể.\n"
-                "- Hỗ trợ của Nhà nước áp dụng theo nhóm đối tượng; chưa có đủ dữ liệu để xác định tỷ lệ cụ thể."
-            )
-        }
-    source_response = _deterministic_source_rule_response(state.get("query", ""), evidence)
-    if source_response:
-        return {"response": source_response}
-    fact_response = _deterministic_source_fact_response(state.get("query", ""), evidence)
-    if fact_response:
-        if (
-            requires_evidence_verification(state.get("query", ""))
-            and "học sinh" in state.get("query", "").casefold()
-            and "hỗ trợ" in state.get("query", "").casefold()
-        ):
-            fact_response = (
-                f"{fact_response.rstrip()}\n"
-                "- Mức đóng hoặc điều kiện xác định mức đóng được đối chiếu theo mức tham chiếu.\n"
-                "- Hỗ trợ của Nhà nước áp dụng theo nhóm đối tượng; chưa đủ dữ liệu để xác định số tiền cụ thể."
-            )
-        return {"response": fact_response}
-    if (
-        requires_evidence_verification(state.get("query", ""))
-        and "học sinh" in state.get("query", "").casefold()
-        and "hỗ trợ" in state.get("query", "").casefold()
-    ):
-        return {
-            "response": (
-                "- Năm 2026: học sinh thuộc nhóm được Nhà nước hỗ trợ mức đóng BHYT.\n"
-                "- Mức đóng hoặc điều kiện xác định mức đóng cần đối chiếu theo mức tham chiếu và văn bản áp dụng.\n"
-                "- Hỗ trợ của Nhà nước được áp dụng theo nhóm đối tượng; nguồn hiện có chưa đủ để xác định số tiền cụ thể.\n"
-                "- Mức đóng hoặc điều kiện xác định mức đóng và hỗ trợ của Nhà nước cần được đối chiếu theo văn bản áp dụng."
-            )
-        }
-    # Legal-unit enumeration is extractive: render canonical labelled units
-    # directly instead of spending an LLM call (and risking reordering or
-    # inventing a missing item).  The guardrail still audits the resulting
-    # claims and emits the same citation contract.
-    if (
-        retrieval_intent(state.get("query", "")) == "legal_unit"
-        and not requires_evidence_verification(state.get("query", ""))
-    ):
-        return {"response": _deterministic_legal_unit_response(evidence)}
     response = await get_runtime().generate(state.get("query", ""), state.get("context", ""))
-    if (
-        requires_evidence_verification(state.get("query", ""))
-        and "học sinh" in state.get("query", "").casefold()
-        and "hỗ trợ" in state.get("query", "").casefold()
-        and "mức đóng hoặc điều kiện xác định mức đóng" not in response.casefold()
-    ):
-        response = (
-            f"{response.strip()}\n- Mức đóng hoặc điều kiện xác định mức đóng và hỗ trợ của Nhà nước "
-            "cần đối chiếu theo mức tham chiếu và văn bản áp dụng."
-        )
-    if (
-        requires_evidence_verification(state.get("query", ""))
-        and "ngoại trú" in response.casefold()
-        and "nội trú" in response.casefold()
-        and "phân biệt nội trú và ngoại trú" not in response.casefold()
-    ):
-        response = f"{response.strip()}\n- Quy định phân biệt nội trú và ngoại trú; mức hưởng phụ thuộc trường hợp áp dụng."
     return {"response": response}
 
 
