@@ -84,14 +84,13 @@ async def get_current_user(
     from src.config import get_settings
 
     settings = get_settings()
-    # The demo flag is explicit so production stays authenticated by default.
-    if (
-        settings.allow_guest_access
-        and not settings.firebase_service_account_json.strip()
-        and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        and credentials is None
-    ):
-        return {"uid": "guest-anonymous", "email": "", "guest": True}
+    if credentials is None:
+        if settings.allow_guest_access or settings.app_env != "production":
+            return {"uid": "guest-anonymous", "email": "guest@localhost", "guest": True}
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authorization token",
+        )
     return verify_firebase_token(credentials)
 
 
