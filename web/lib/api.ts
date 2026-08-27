@@ -1,4 +1,17 @@
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const DEFAULT_PROD_API = "https://medipay-api-1u5t.onrender.com";
+
+function getApiUrl(): string {
+  if (typeof window !== "undefined" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+    const envUrl = process.env.NEXT_PUBLIC_API_URL;
+    if (envUrl && !envUrl.includes("localhost") && !envUrl.includes("127.0.0.1")) {
+      return envUrl;
+    }
+    return DEFAULT_PROD_API;
+  }
+  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+}
+
+const apiUrl = getApiUrl();
 
 async function authorizationHeaders(forceRefresh = false): Promise<Record<string, string>> {
   if (typeof window === "undefined") return {};
