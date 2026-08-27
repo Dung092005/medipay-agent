@@ -159,8 +159,8 @@ class Settings(BaseSettings):
                 ):
                     missing.append("FIREBASE_SERVICE_ACCOUNT_JSON (valid service-account JSON)")
         origins = [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
-        if not origins or "*" in origins or any("localhost" in origin for origin in origins):
-            missing.append("CORS_ORIGINS (explicit HTTPS origins)")
+        if not origins or "*" in origins:
+            missing.append("CORS_ORIGINS (explicit origins required)")
         if missing:
             raise ValueError("Production configuration incomplete: " + ", ".join(missing))
 
