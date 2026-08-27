@@ -19,6 +19,9 @@ def get_llm() -> ChatOpenAI:
         raise LlmConfigurationError("Only OpenAI or OpenRouter is supported for chat")
     if not settings.openai_api_key or not settings.model_name:
         raise LlmConfigurationError("Chat provider is not configured")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     kwargs: dict = {
         "model": settings.model_name,
         "api_key": settings.openai_api_key,
@@ -26,6 +29,7 @@ def get_llm() -> ChatOpenAI:
         "timeout": settings.llm_timeout_seconds,
         "max_tokens": settings.llm_max_output_tokens,
         "max_retries": 2,
+        "default_headers": headers,
     }
     if settings.openai_base_url:
         kwargs["base_url"] = settings.openai_base_url
@@ -41,6 +45,9 @@ def get_rewrite_llm() -> ChatOpenAI:
         raise LlmConfigurationError("Only OpenAI or OpenRouter is supported for query rewriting")
     if not settings.openai_api_key or not settings.model_name:
         raise LlmConfigurationError("Query rewrite provider is not configured")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     kwargs: dict = {
         "model": settings.model_name,
         "api_key": settings.openai_api_key,
@@ -48,6 +55,7 @@ def get_rewrite_llm() -> ChatOpenAI:
         "timeout": min(settings.llm_timeout_seconds, settings.query_rewrite_timeout_seconds),
         "max_tokens": settings.query_rewrite_max_tokens,
         "max_retries": 1,
+        "default_headers": headers,
     }
     if settings.openai_base_url:
         kwargs["base_url"] = settings.openai_base_url

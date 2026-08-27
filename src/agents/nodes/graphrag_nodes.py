@@ -758,8 +758,30 @@ async def guardrail_node(state: AgentState) -> dict:
         if claim.get("verification") in ("entailed", "partial")
         for evidence_id in claim.get("evidence_ids", [])
     }
-    if evidence and not deterministic_response and supported_ids:
-        citations = [citation for citation in citations if citation.chunk_id in supported_ids]
+    if response != NO_EVIDENCE_RESPONSE:
+        from src.config import get_settings
+        ordered_citations: list[Citation] = []
+        seen_chunks: set[str] = set()
+        seen_docs: set[str] = set()
+
+        # 1. Add directly supported citations
+        for citation in citations:
+            if citation.chunk_id in supported_ids:
+                seen_chunks.add(citation.chunk_id)
+                if citation.document_number:
+                    seen_docs.add(citation.document_number)
+                ordered_citations.append(citation)
+
+        # 2. Backfill with relevant legal evidence citations up to max_citations
+        for citation in _citations_from_evidence(evidence):
+            if citation.chunk_id not in seen_chunks and (not citation.document_number or citation.document_number not in seen_docs):
+                seen_chunks.add(citation.chunk_id)
+                if citation.document_number:
+                    seen_docs.add(citation.document_number)
+                ordered_citations.append(citation)
+            if len(ordered_citations) >= get_settings().max_citations:
+                break
+        citations = ordered_citations
     return {
         "response": response,
         "citations": [citation.model_dump() for citation in citations],

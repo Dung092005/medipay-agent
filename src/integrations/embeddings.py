@@ -19,7 +19,10 @@ class OpenAIEmbeddingModel:
     def __init__(self, api_key: str, model: str, dimensions: int, base_url: str = ""):
         from openai import AsyncOpenAI
 
-        kwargs: dict = {"api_key": api_key}
+        default_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        kwargs: dict = {"api_key": api_key, "default_headers": default_headers}
         if base_url:
             kwargs["base_url"] = base_url
         self.client = AsyncOpenAI(**kwargs)
