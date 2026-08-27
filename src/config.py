@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     cost_quota_units: int = Field(default=100_000, ge=1_000, le=10_000_000)
     cost_quota_window_seconds: int = Field(default=86_400, ge=60, le=31_536_000)
     metrics_token: str = ""
+    allow_guest_access: bool = False
 
     llm_provider: str = "openrouter"
     model_name: str = ""
@@ -144,18 +145,19 @@ class Settings(BaseSettings):
         }
         missing.extend(name for name, value in required_values.items() if not str(value).strip())
         firebase_json = self.firebase_service_account_json.strip()
-        if not firebase_json and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-            missing.append("FIREBASE_SERVICE_ACCOUNT_JSON/GOOGLE_APPLICATION_CREDENTIALS")
-        elif firebase_json:
-            try:
-                service_account = json.loads(firebase_json)
-            except json.JSONDecodeError:
-                service_account = None
-            if not isinstance(service_account, dict) or not all(
-                str(service_account.get(field, "")).strip()
-                for field in ("type", "project_id", "client_email", "private_key")
-            ):
-                missing.append("FIREBASE_SERVICE_ACCOUNT_JSON (valid service-account JSON)")
+        if not self.allow_guest_access:
+            if not firebase_json and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+                missing.append("FIREBASE_SERVICE_ACCOUNT_JSON/GOOGLE_APPLICATION_CREDENTIALS")
+            elif firebase_json:
+                try:
+                    service_account = json.loads(firebase_json)
+                except json.JSONDecodeError:
+                    service_account = None
+                if not isinstance(service_account, dict) or not all(
+                    str(service_account.get(field, "")).strip()
+                    for field in ("type", "project_id", "client_email", "private_key")
+                ):
+                    missing.append("FIREBASE_SERVICE_ACCOUNT_JSON (valid service-account JSON)")
         origins = [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
         if not origins or "*" in origins or any("localhost" in origin for origin in origins):
             missing.append("CORS_ORIGINS (explicit HTTPS origins)")

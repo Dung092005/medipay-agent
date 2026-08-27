@@ -84,14 +84,14 @@ async def get_current_user(
     from src.config import get_settings
 
     settings = get_settings()
-    # Local Group workflow: allow unauthenticated chat until Firebase is wired.
+    # The demo flag is explicit so production stays authenticated by default.
     if (
-        settings.app_env != "production"
+        settings.allow_guest_access
         and not settings.firebase_service_account_json.strip()
         and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         and credentials is None
     ):
-        return {"uid": "dev-anonymous", "email": "dev@localhost", "dev": True}
+        return {"uid": "guest-anonymous", "email": "", "guest": True}
     return verify_firebase_token(credentials)
 
 

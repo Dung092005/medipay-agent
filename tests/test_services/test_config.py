@@ -28,3 +28,22 @@ def test_production_contract_rejects_malformed_firebase_json(monkeypatch):
 
 def test_non_production_contract_allows_local_defaults():
     Settings(app_env="test").validate_production_contract()
+
+
+def test_production_contract_allows_guest_mode_without_firebase(monkeypatch):
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    settings = Settings(
+        app_env="production",
+        allow_guest_access=True,
+        database_url="postgresql+asyncpg://example",
+        qdrant_url="https://example.qdrant.io",
+        qdrant_api_key="test-key",
+        neo4j_uri="neo4j+s://example.databases.neo4j.io",
+        neo4j_password="test-password",
+        openai_api_key="test-key",
+        model_name="gpt-4o-mini",
+        metrics_token="test-metrics-token",
+        cors_origins="https://example.vercel.app",
+    )
+
+    settings.validate_production_contract()
