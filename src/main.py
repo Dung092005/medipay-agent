@@ -241,6 +241,22 @@ app.include_router(auth_router, prefix="/api/v1")
 
 
 @app.get(
+    "/",
+    tags=["System"],
+    summary="API Root",
+    description="Welcome endpoint with links to documentation and health status.",
+)
+async def root():
+    return {
+        "status": "ok",
+        "message": "MediPay Agent API is online",
+        "docs": "/docs",
+        "health": "/health",
+        "ready": "/ready",
+    }
+
+
+@app.get(
     "/health",
     tags=["System"],
     summary="Check API liveness",
