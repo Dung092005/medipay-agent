@@ -674,13 +674,7 @@ async def guardrail_node(state: AgentState) -> dict:
         else state.get("direct_citations") or _citations_from_evidence(evidence)
     )
     claims = _audit_claims(response, citations, state.get("query", ""))
-    if evidence and not deterministic_response and any(
-        claim["verification"] != "entailed" for claim in claims
-    ):
-        response, claims = _retain_supported_claims(claims)
     # An abstention is a statement about the absence of sufficient support.
-    # Showing a residual, unrelated citation next to it is internally
-    # contradictory and makes a failed retrieval look authoritative.
     if response == NO_EVIDENCE_RESPONSE:
         citations = []
         claims = []
