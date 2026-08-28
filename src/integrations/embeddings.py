@@ -17,12 +17,24 @@ class EmbeddingModel(Protocol):
 
 class OpenAIEmbeddingModel:
     def __init__(self, api_key: str, model: str, dimensions: int, base_url: str = ""):
+        import httpx
         from openai import AsyncOpenAI
 
         default_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "HTTP-Referer": "https://medipay-ai.vercel.app",
+            "X-Title": "MediPay BHYT Agent",
         }
-        kwargs: dict = {"api_key": api_key, "default_headers": default_headers}
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+        )
+        kwargs: dict = {
+            "api_key": api_key,
+            "default_headers": default_headers,
+            "http_client": http_client,
+            "max_retries": 3,
+        }
         if base_url:
             kwargs["base_url"] = base_url
         self.client = AsyncOpenAI(**kwargs)
@@ -30,20 +42,34 @@ class OpenAIEmbeddingModel:
         self.dimensions = dimensions
 
     async def embed_query(self, text: str) -> Sequence[float]:
-        response = await self.client.embeddings.create(
-            model=self.model, input=text, dimensions=self.dimensions
-        )
-        return response.data[0].embedding
+        import asyncio
+        for attempt in range(3):
+            try:
+                response = await self.client.embeddings.create(
+                    model=self.model, input=text, dimensions=self.dimensions
+                )
+                return response.data[0].embedding
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.5 * (2 ** attempt))
 
     async def embed_queries(self, texts: Sequence[str]) -> list[Sequence[float]]:
+        import asyncio
         values = list(texts)
         if not values:
             return []
-        response = await self.client.embeddings.create(
-            model=self.model, input=values, dimensions=self.dimensions
-        )
-        ordered = sorted(response.data, key=lambda item: int(item.index))
-        return [item.embedding for item in ordered]
+        for attempt in range(3):
+            try:
+                response = await self.client.embeddings.create(
+                    model=self.model, input=values, dimensions=self.dimensions
+                )
+                ordered = sorted(response.data, key=lambda item: int(item.index))
+                return [item.embedding for item in ordered]
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.5 * (2 ** attempt))
 
 
 class UnconfiguredEmbeddingModel:
