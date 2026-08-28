@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 from typing import Any, List, Optional
@@ -18,13 +19,15 @@ from pydantic import Field
 
 from src.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 
 class LlmConfigurationError(RuntimeError):
     """The configured provider cannot serve chat requests."""
 
 
 class ChatVertexGemini(BaseChatModel):
-    """LangChain-compatible ChatModel wrapper for Google GenAI / Vertex AI SDK."""
+    """LangChain-compatible ChatModel wrapper for Google GenAI / Vertex AI SDK with graceful fallback."""
 
     project: str = "project-3b0c96e7-a43e-4f65-8bd"
     location: str = "global"
@@ -44,6 +47,26 @@ class ChatVertexGemini(BaseChatModel):
         if api_key:
             return genai.Client(api_key=api_key)
         return genai.Client(vertexai=True, project=self.project, location=self.location)
+
+    def _get_fallback_llm(self) -> Optional[ChatOpenAI]:
+        settings = get_settings()
+        if not settings.openai_api_key:
+            return None
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        fallback_model = "gpt-5" if settings.openai_base_url and "yescale" in settings.openai_base_url else "openai/gpt-4o-mini"
+        kwargs: dict = {
+            "model": fallback_model,
+            "api_key": settings.openai_api_key,
+            "temperature": self.temperature,
+            "timeout": self.timeout,
+            "max_retries": 2,
+            "default_headers": headers,
+        }
+        if settings.openai_base_url:
+            kwargs["base_url"] = settings.openai_base_url
+        return ChatOpenAI(**kwargs)
 
     def _format_prompt(self, messages: List[Any]) -> str:
         prompt_parts = []
@@ -68,21 +91,28 @@ class ChatVertexGemini(BaseChatModel):
         run_manager: Any = None,
         **kwargs: Any,
     ) -> ChatResult:
-        client = self._get_client()
-        full_prompt = self._format_prompt(messages)
-        config: dict[str, Any] = {"temperature": self.temperature}
-        if self.max_output_tokens:
-            config["max_output_tokens"] = self.max_output_tokens
-        if stop:
-            config["stop_sequences"] = stop
+        try:
+            client = self._get_client()
+            full_prompt = self._format_prompt(messages)
+            config: dict[str, Any] = {"temperature": self.temperature}
+            if self.max_output_tokens:
+                config["max_output_tokens"] = self.max_output_tokens
+            if stop:
+                config["stop_sequences"] = stop
 
-        res = client.models.generate_content(
-            model=self.model,
-            contents=full_prompt,
-            config=config,
-        )
-        msg = AIMessage(content=res.text or "")
-        return ChatResult(generations=[ChatGeneration(message=msg)])
+            res = client.models.generate_content(
+                model=self.model,
+                contents=full_prompt,
+                config=config,
+            )
+            msg = AIMessage(content=res.text or "")
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+        except Exception as exc:
+            fallback = self._get_fallback_llm()
+            if fallback is not None:
+                logger.warning("Gemini generate failed (%s), falling back to OpenAI/OpenRouter", exc)
+                return fallback._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            raise
 
     async def _agenerate(
         self,
@@ -91,38 +121,53 @@ class ChatVertexGemini(BaseChatModel):
         run_manager: Any = None,
         **kwargs: Any,
     ) -> ChatResult:
-        client = self._get_client()
-        full_prompt = self._format_prompt(messages)
-        config: dict[str, Any] = {"temperature": self.temperature}
-        if self.max_output_tokens:
-            config["max_output_tokens"] = self.max_output_tokens
-        if stop:
-            config["stop_sequences"] = stop
-
-        res = await client.aio.models.generate_content(
-            model=self.model,
-            contents=full_prompt,
-            config=config,
-        )
-        msg = AIMessage(content=res.text or "")
-        return ChatResult(generations=[ChatGeneration(message=msg)])
-
-    def with_structured_output(self, schema: Any, **kwargs: Any):
-        """Return a runnable returning parsed Pydantic schema using Gemini native JSON schema."""
-
-        async def _run_structured(messages: Any, **_kw: Any):
+        try:
             client = self._get_client()
             full_prompt = self._format_prompt(messages)
+            config: dict[str, Any] = {"temperature": self.temperature}
+            if self.max_output_tokens:
+                config["max_output_tokens"] = self.max_output_tokens
+            if stop:
+                config["stop_sequences"] = stop
+
             res = await client.aio.models.generate_content(
                 model=self.model,
                 contents=full_prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": schema,
-                    "temperature": 0.0,
-                },
+                config=config,
             )
-            return schema.model_validate_json(res.text)
+            msg = AIMessage(content=res.text or "")
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+        except Exception as exc:
+            fallback = self._get_fallback_llm()
+            if fallback is not None:
+                logger.warning("Gemini agenerate failed (%s), falling back to OpenAI/OpenRouter", exc)
+                return await fallback._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            raise
+
+    def with_structured_output(self, schema: Any, **kwargs: Any):
+        """Return a runnable returning parsed Pydantic schema using Gemini native JSON schema with fallback."""
+
+        async def _run_structured(messages: Any, **_kw: Any):
+            try:
+                client = self._get_client()
+                full_prompt = self._format_prompt(messages)
+                res = await client.aio.models.generate_content(
+                    model=self.model,
+                    contents=full_prompt,
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_schema": schema,
+                        "temperature": 0.0,
+                    },
+                )
+                return schema.model_validate_json(res.text)
+            except Exception as exc:
+                fallback = self._get_fallback_llm()
+                if fallback is not None:
+                    logger.warning("Gemini structured output failed (%s), falling back to OpenAI", exc)
+                    structured_fb = fallback.with_structured_output(schema, method="json_schema")
+                    return await structured_fb.ainvoke(messages)
+                raise
 
         return RunnableLambda(_run_structured)
 
