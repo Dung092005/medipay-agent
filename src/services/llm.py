@@ -15,7 +15,6 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
 from langchain_openai import ChatOpenAI
-from pydantic import Field
 
 from src.config import get_settings
 
@@ -27,7 +26,7 @@ class LlmConfigurationError(RuntimeError):
 
 
 class ChatVertexGemini(BaseChatModel):
-    """LangChain-compatible ChatModel wrapper for Google GenAI / Vertex AI SDK with graceful fallback."""
+    """LangChain-compatible ChatModel wrapper for Google GenAI / Vertex AI SDK with robust auth."""
 
     project: str = "project-3b0c96e7-a43e-4f65-8bd"
     location: str = "global"
@@ -42,10 +41,36 @@ class ChatVertexGemini(BaseChatModel):
 
     def _get_client(self):
         from google import genai
+        from google.oauth2 import credentials, service_account
+        import json
 
+        # 1. Try credentials JSON from GOOGLE_CREDENTIALS_JSON or FIREBASE_SERVICE_ACCOUNT_JSON
+        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON") or os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or ""
+        if creds_json.strip():
+            try:
+                info = json.loads(creds_json)
+                if info.get("type") == "authorized_user":
+                    creds = credentials.Credentials.from_authorized_user_info(
+                        info, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                    )
+                    return genai.Client(vertexai=True, project=self.project, location=self.location, credentials=creds)
+                elif info.get("type") == "service_account":
+                    creds = service_account.Credentials.from_service_account_info(
+                        info, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                    )
+                    return genai.Client(vertexai=True, project=self.project, location=self.location, credentials=creds)
+            except Exception as e:
+                logger.warning("Failed to load GOOGLE_CREDENTIALS_JSON: %s", e)
+
+        # 2. Try Gemini API key
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None
         if api_key:
-            return genai.Client(api_key=api_key)
+            try:
+                return genai.Client(api_key=api_key)
+            except Exception as e:
+                logger.warning("Failed to create Client with API key: %s", e)
+
+        # 3. Default: Vertex AI with ADC
         return genai.Client(vertexai=True, project=self.project, location=self.location)
 
     def _get_fallback_llm(self) -> Optional[ChatOpenAI]:
