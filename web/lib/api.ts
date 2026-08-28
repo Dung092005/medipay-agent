@@ -196,25 +196,30 @@ export async function sendChatMessageStream(
     const frames = buffer.split("\n\n");
     buffer = frames.pop() ?? "";
     for (const frame of frames) {
+      if (!frame.trim()) continue;
       const lines = frame.split("\n");
-      const eventType = lines
-        .find((line) => line.startsWith("event: "))
-        ?.slice(7)
-        .trim();
-      const dataLine = lines.find((line) => line.startsWith("data: "));
+      const eventLine = lines.find((line) => line.startsWith("event:") || line.startsWith("event: "));
+      const eventType = eventLine ? eventLine.replace(/^event:\s*/, "").trim() : undefined;
+      const dataLine = lines.find((line) => line.startsWith("data:") || line.startsWith("data: "));
       if (!dataLine) continue;
-      const data = JSON.parse(dataLine.slice(6)) as Record<string, unknown>;
-      // Backend emits SSE event name separately from JSON body.
-      const payload = { ...data, type: eventType ?? data.type } as ChatStreamEvent;
-      onEvent(payload);
-      if (payload.type === "final") {
-        final = {
-          response: payload.response,
-          citations: payload.citations ?? [],
-          claims: payload.claims,
-        };
+      try {
+        const jsonStr = dataLine.replace(/^data:\s*/, "").trim();
+        const data = JSON.parse(jsonStr) as Record<string, unknown>;
+        const payload = { ...data, type: eventType ?? data.type } as ChatStreamEvent;
+        onEvent(payload);
+        if (payload.type === "final") {
+          final = {
+            response: payload.response,
+            citations: payload.citations ?? [],
+            claims: payload.claims,
+          };
+        }
+        if (payload.type === "error") throw new Error(payload.message || "Lỗi máy chủ khi xử lý stream");
+      } catch (err) {
+        if (err instanceof Error && (err.message.includes("stream") || err.message.includes("Lỗi") || err.message.includes("unavailable"))) {
+          throw err;
+        }
       }
-      if (payload.type === "error") throw new Error(payload.message);
     }
     if (chunk.done) break;
   }
