@@ -31,11 +31,17 @@ class Settings(BaseSettings):
     metrics_token: str = ""
     allow_guest_access: bool = False
 
-    llm_provider: str = "openrouter"
-    model_name: str = ""
+    llm_provider: str = "google"
+    model_name: str = "gemini-3.1-flash-lite"
     openai_api_key: str = ""
     # OpenAI-compatible base URL (OpenRouter local default; leave empty for OpenAI).
     openai_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Google Cloud / Vertex AI Settings
+    google_project_id: str = "project-3b0c96e7-a43e-4f65-8bd"
+    google_location: str = "global"
+    google_api_key: str = ""
+
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     llm_timeout_seconds: float = Field(default=45.0, gt=0)
     llm_max_output_tokens: int = Field(default=4000, ge=64, le=16_384)
@@ -99,11 +105,13 @@ class Settings(BaseSettings):
 
     @property
     def embeddings_configured(self) -> bool:
-        return bool(self.embedding_provider and self.embedding_model and self.openai_api_key)
+        return bool(self.embedding_provider and self.embedding_model and (self.openai_api_key or self.embedding_api_key))
 
     @property
     def llm_configured(self) -> bool:
         provider = self.llm_provider.casefold()
+        if provider in {"google", "vertexai", "gemini"}:
+            return bool(self.model_name and self.google_project_id)
         return provider in {"openai", "openrouter"} and bool(
             self.model_name and self.openai_api_key
         )
@@ -139,10 +147,11 @@ class Settings(BaseSettings):
             "QDRANT_API_KEY": self.qdrant_api_key,
             "NEO4J_URI": self.neo4j_uri,
             "NEO4J_PASSWORD": self.neo4j_password,
-            "OPENAI_API_KEY": self.openai_api_key,
             "MODEL_NAME": self.model_name,
             "METRICS_TOKEN": self.metrics_token,
         }
+        if self.llm_provider.casefold() not in {"google", "vertexai", "gemini"}:
+            required_values["OPENAI_API_KEY"] = self.openai_api_key
         missing.extend(name for name, value in required_values.items() if not str(value).strip())
         firebase_json = self.firebase_service_account_json.strip()
         if not self.allow_guest_access:

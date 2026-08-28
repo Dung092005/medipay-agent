@@ -18,3 +18,5 @@ openai>=2.26.0,<3
 qdrant-client==1.19.0
 redis>=5.0.0,<6
 tiktoken>=0.7.0,<1
+google-genai>=2.20.0
+

@@ -10,6 +10,7 @@ COPY requirements/runtime.lock .
 RUN python -m venv "${VIRTUAL_ENV}" \
     && pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --require-hashes -r runtime.lock \
+    && pip install --no-cache-dir "google-genai>=2.20.0" \
     && rm -rf "${VIRTUAL_ENV}/bin"/pip* "${VIRTUAL_ENV}/bin"/easy_install* \
         "${VIRTUAL_ENV}/lib/python3.11/site-packages"/pip* \
         "${VIRTUAL_ENV}/lib/python3.11/site-packages"/setuptools* \

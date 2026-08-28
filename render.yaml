@@ -33,12 +33,20 @@ services:
         sync: false
       - key: NEO4J_DATABASE
         sync: false
+      - key: LLM_PROVIDER
+        value: "google"
+      - key: MODEL_NAME
+        value: "gemini-3.1-flash-lite"
+      - key: GOOGLE_PROJECT_ID
+        value: "project-3b0c96e7-a43e-4f65-8bd"
+      - key: GOOGLE_LOCATION
+        value: "global"
+      - key: GOOGLE_API_KEY
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
-      - key: MODEL_NAME
-        sync: false
       - key: LLM_MAX_OUTPUT_TOKENS
-        value: "900"
+        value: "4000"
       - key: EMBEDDING_MODEL
         sync: false
       - key: EMBEDDING_DIMENSIONS
