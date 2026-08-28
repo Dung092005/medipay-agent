@@ -361,6 +361,7 @@ class GraphRagRuntime:
                     output={
                         "evidence_count": len(bundle.evidence),
                         "relation_count": len(bundle.relations),
+                        "documents_retrieved": list(dict.fromkeys(item.title for item in bundle.evidence[:6])),
                         "chunk_ids": [item.chunk_id for item in bundle.evidence],
                         "direct": bool(bundle.direct_response),
                     }
@@ -1767,53 +1768,63 @@ class GraphRagRuntime:
             metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="cache")
             return cached[0]
         answer_instruction = _answer_format_instruction(query)
-        try:
-            llm = get_llm()
-            result = await asyncio.wait_for(
-                llm.ainvoke(
-                    [
-                        SystemMessage(content=SYSTEM_PROMPT),
-                        HumanMessage(
-                            content=(
-                                f"Câu hỏi người dùng:\n{query}\n\n"
-                                f"Nguồn pháp lý được phép sử dụng:\n{context}\n\n"
-                                f"Định dạng đầu ra bắt buộc:\n{answer_instruction}"
-                            )
-                        ),
-                    ],
-                    config=llm_invoke_config() or None,
-                ),
-                timeout=settings.llm_timeout_seconds,
-            )
-        except TimeoutError:
-            metrics.inc("generation_requests_total", outcome="timeout")
-            metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="timeout")
-            return NO_EVIDENCE_RESPONSE
-        except Exception as exc:
-            metrics.inc("generation_requests_total", outcome="error")
-            metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="error")
-            raise ChatProviderError("Chat provider failed") from exc
-        content = result.content
-        if isinstance(content, str):
-            metrics.inc("generation_requests_total", outcome="success")
-            metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="success")
-            if current_release and context and cache_allowed and content:
-                self._store_answer_cache(answer_key, content)
-            return content
-        if isinstance(content, Sequence):
-            value = "".join(
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-            metrics.inc("generation_requests_total", outcome="success")
-            metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="success")
-            if current_release and context and cache_allowed and value:
-                self._store_answer_cache(answer_key, value)
-            return value
-        metrics.inc("generation_requests_total", outcome="empty")
-        metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="empty")
-        return ""
+        async with trace_span(
+            "llm-generate",
+            as_type="generation",
+            input={"query": query, "context_length": len(context)},
+            metadata={"model": settings.model_name},
+        ) as gen_span:
+            try:
+                llm = get_llm()
+                result = await asyncio.wait_for(
+                    llm.ainvoke(
+                        [
+                            SystemMessage(content=SYSTEM_PROMPT),
+                            HumanMessage(
+                                content=(
+                                    f"Câu hỏi người dùng:\n{query}\n\n"
+                                    f"Nguồn pháp lý được phép sử dụng:\n{context}\n\n"
+                                    f"Định dạng đầu ra bắt buộc:\n{answer_instruction}"
+                                )
+                            ),
+                        ],
+                        config=llm_invoke_config() or None,
+                    ),
+                    timeout=settings.llm_timeout_seconds,
+                )
+            except TimeoutError:
+                metrics.inc("generation_requests_total", outcome="timeout")
+                metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="timeout")
+                return NO_EVIDENCE_RESPONSE
+            except Exception as exc:
+                metrics.inc("generation_requests_total", outcome="error")
+                metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="error")
+                raise ChatProviderError("Chat provider failed") from exc
+            content = result.content
+            if isinstance(content, str):
+                metrics.inc("generation_requests_total", outcome="success")
+                metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="success")
+                if current_release and context and cache_allowed and content:
+                    self._store_answer_cache(answer_key, content)
+                if gen_span is not None:
+                    gen_span.update(output={"response": content})
+                return content
+            if isinstance(content, Sequence):
+                value = "".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+                metrics.inc("generation_requests_total", outcome="success")
+                metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="success")
+                if current_release and context and cache_allowed and value:
+                    self._store_answer_cache(answer_key, value)
+                if gen_span is not None:
+                    gen_span.update(output={"response": value})
+                return value
+            metrics.inc("generation_requests_total", outcome="empty")
+            metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="empty")
+            return ""
 
     def _store_answer_cache(self, key: tuple[tuple[object, ...], str], answer: str) -> None:
         if len(self._answer_cache) >= 128:
