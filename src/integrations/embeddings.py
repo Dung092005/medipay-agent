@@ -60,9 +60,19 @@ def get_embedding_model() -> EmbeddingModel:
     api_key = settings.embedding_api_key or settings.openai_api_key
     if not api_key:
         return UnconfiguredEmbeddingModel()
+
+    base_url = settings.openai_base_url or ""
+    model = settings.embedding_model
+
+    # Automatically route OpenRouter keys or recover from dead yescale proxy
+    if api_key.startswith("sk-or-") or "yescale" in base_url.lower():
+        base_url = "https://openrouter.ai/api/v1"
+        if not model.startswith("openai/"):
+            model = f"openai/{model}"
+
     return OpenAIEmbeddingModel(
         api_key,
-        settings.embedding_model,
+        model,
         settings.embedding_dimensions,
-        base_url=settings.openai_base_url,
+        base_url=base_url,
     )

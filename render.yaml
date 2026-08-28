@@ -43,12 +43,14 @@ services:
         value: "global"
       - key: GOOGLE_API_KEY
         sync: false
+      - key: OPENAI_BASE_URL
+        value: "https://openrouter.ai/api/v1"
       - key: OPENAI_API_KEY
         sync: false
       - key: LLM_MAX_OUTPUT_TOKENS
         value: "4000"
       - key: EMBEDDING_MODEL
-        sync: false
+        value: "openai/text-embedding-3-small"
       - key: EMBEDDING_DIMENSIONS
         value: "1536"
       - key: RETRIEVAL_TIMEOUT_SECONDS
