@@ -56,26 +56,59 @@ def verify_firebase_token(credentials: HTTPAuthorizationCredentials | None) -> d
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authorization token",
         )
-    _ensure_firebase_initialized()
+    token = credentials.credentials
+    # 1. Try Firebase verification if configured
     try:
-        decoded = fb_auth.verify_id_token(credentials.credentials)
+        _ensure_firebase_initialized()
+        decoded = fb_auth.verify_id_token(token)
         return decoded
-    except fb_auth.InvalidIdTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Firebase ID token",
-        )
-    except fb_auth.ExpiredIdTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Expired Firebase ID token",
-        )
     except Exception:
-        logger.exception("Firebase token verification failed")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not verify token",
+        pass
+
+    # 2. Try Google OAuth2 ID token verification
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token as google_id_token
+
+        google_client_id = os.getenv(
+            "GOOGLE_CLIENT_ID",
+            "419992923844-mfdcpr3l6bm4rs7bmd57m8lq7jr8lvgs.apps.googleusercontent.com",
         )
+        decoded = google_id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            google_client_id,
+        )
+        return {
+            "uid": decoded.get("sub", ""),
+            "email": decoded.get("email", ""),
+            "name": decoded.get("name", ""),
+            "picture": decoded.get("picture", ""),
+        }
+    except Exception:
+        pass
+
+    # 3. Fallback: decode Google token or query tokeninfo
+    try:
+        import httpx
+        with httpx.Client(timeout=4.0) as client:
+            resp = client.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={token}")
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "uid": data.get("sub", ""),
+                    "email": data.get("email", ""),
+                    "name": data.get("name", ""),
+                    "picture": data.get("picture", ""),
+                }
+    except Exception:
+        pass
+
+    logger.warning("Token verification failed for incoming request")
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not verify authorization token",
+    )
 
 
 async def get_current_user(

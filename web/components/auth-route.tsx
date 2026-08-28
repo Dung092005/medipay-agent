@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "../lib/auth-context";
+import { ServerWarmupOverlay } from "./server-warmup";
 
 export function AuthRoute({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -18,12 +19,17 @@ export function AuthRoute({ children }: { children: React.ReactNode }) {
     return (
       <main className="auth-loading" aria-live="polite">
         <div className="login-spinner" />
-        <p>Đang kiểm tra đăng nhập...</p>
+        <p>Đang kiểm tra phiên đăng nhập...</p>
       </main>
     );
   }
 
   if (!user) return null;
 
-  return <>{children}</>;
+  return (
+    <>
+      <ServerWarmupOverlay />
+      {children}
+    </>
+  );
 }
