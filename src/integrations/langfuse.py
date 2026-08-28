@@ -108,7 +108,18 @@ async def trace_span(
             updates["metadata"] = dict(metadata)
         if updates:
             observation.update(**updates)
-        yield observation
+        try:
+            yield observation
+        except Exception as exc:
+            try:
+                observation.update(
+                    level="ERROR",
+                    status_message=f"{type(exc).__name__}: {str(exc)}",
+                    output={"error": str(exc), "error_type": type(exc).__name__},
+                )
+            except Exception:
+                pass
+            raise
 
 
 def flush_langfuse() -> None:

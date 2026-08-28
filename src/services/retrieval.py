@@ -46,6 +46,13 @@ _BYE_PATTERN = re.compile(
     r"^(?:tạm\s+biệt|bye|goodbye)(?:\s+(?:bạn|ad|bot|em|anh|chị|nhé|nha|ạ))*$",
     re.IGNORECASE,
 )
+_CAPABILITY_PATTERN = re.compile(
+    r"^(?:bạn\s+(?:có\s+thể\s+)?(?:giúp|làm|hỗ\s+trợ)\s+(?:được\s+)?(?:gì|những\s+gì)(?:\s+cho\s+tôi)?|"
+    r"bạn\s+là\s+ai|"
+    r"(?:giới\s+thiệu|chức\s+năng|vai\s+trò)\s+(?:của\s+)?(?:bạn|trợ\s+lý|hệ\s+thống)|"
+    r"hướng\s+dẫn\s+(?:tôi\s+)?(?:sử\s+dụng|cách\s+dùng|tra\s+cứu))(?:\s+(?:ạ|nhé|nha|ơi))*$",
+    re.IGNORECASE,
+)
 
 
 def normalize_identifier(value: str) -> str:
@@ -296,6 +303,14 @@ def policy_response(query: str) -> str | None:
         return "Rất vui được hỗ trợ bạn."
     if _BYE_PATTERN.match(social):
         return "Tạm biệt bạn. Khi cần hỗ trợ thông tin BHYT và viện phí, tôi luôn sẵn sàng hỗ trợ!"
+    if _CAPABILITY_PATTERN.match(social):
+        return (
+            "Tôi là Trợ lý AI chuyên hỗ trợ tra cứu và giải đáp thông tin pháp luật Bảo hiểm Y tế (BHYT) Việt Nam:\n"
+            "- Hướng dẫn thủ tục hồ sơ, cấp, đổi thẻ BHYT và cập nhật thông tin trên thẻ.\n"
+            "- Giải thích quy định về nơi đăng ký khám chữa bệnh ban đầu, chuyển tuyến và mức hưởng BHYT đúng tuyến/trái tuyến.\n"
+            "- Cung cấp thông tin điều kiện hưởng chính sách không cùng chi trả khi tham gia BHYT 5 năm liên tục.\n"
+            "- Tra cứu và đối chiếu các văn bản pháp lý BHYT hiện hành (Luật, Nghị định, Thông tư của Bộ Y tế, BHXH Việt Nam)."
+        )
     if any(token in lowered for token in ("bỏ qua hướng dẫn", "ignore previous", "system prompt", "prompt nội bộ")):
         return (
             "Tôi không thể thực hiện yêu cầu thay đổi quy tắc vận hành hoặc tiết lộ "

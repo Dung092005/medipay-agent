@@ -297,6 +297,7 @@ async def test_retrieve_nests_child_span_names():
         "retrieve-context",
         "get-current-dataset",
         "embedding-query",
+        "lexical-search-postgres",
         "qdrant-search",
     ]
     assert result_evidence[0].chunk_id == "chunk-1"

@@ -7,6 +7,7 @@ from functools import lru_cache
 from src.agents.prompts import NO_EVIDENCE_RESPONSE
 from src.agents.state import AgentState
 from src.config import get_settings
+from src.integrations.langfuse import trace_span
 from src.models.graph import Citation, Entity, Relation, RetrievalResult
 from src.services.chat import get_runtime
 from src.services.claims import build_legal_claim, claim_dict, classify_claim
@@ -49,63 +50,79 @@ _STATUS_MARKERS = ("còn hiệu lực", "hết hiệu lực", "không còn hiệ
 
 
 async def intake_node(state: AgentState) -> dict:
-    query = state.get("query", "").strip()
-    if not query:
-        return {"error": "Query must not be empty"}
-    return {"query": query}
+    async with trace_span("node-intake", input={"query": state.get("query", "")}) as span:
+        query = state.get("query", "").strip()
+        if not query:
+            if span is not None:
+                span.update(level="ERROR", status_message="Query is empty")
+            return {"error": "Query must not be empty"}
+        if span is not None:
+            span.update(output={"query": query})
+        return {"query": query}
 
 
 async def extract_entities_node(state: AgentState) -> dict:
-    query = state.get("query", "")
-    return {"entities": [Entity(name=query, entity_type="query")] if query else []}
+    async with trace_span("node-extract-entities", input={"query": state.get("query", "")}) as span:
+        query = state.get("query", "")
+        entities = [Entity(name=query, entity_type="query")] if query else []
+        if span is not None:
+            span.update(output={"entity_count": len(entities)})
+        return {"entities": entities}
 
 
 async def retrieve_vectors_node(state: AgentState) -> dict:
     query = state.get("query", "")
-    runtime = get_runtime()
-    subqueries = decompose_query(query)
-    # Adaptive retrieval preserves the complete user question and pairs it
-    # with a clause-shaped rewrite. Running deterministic decomposition first
-    # used to discard cross-condition facts (e.g. “mức đóng *và* hỗ trợ”),
-    # bypassing both HyDE and the current-law reranker.
-    if requires_evidence_verification(query):
-        # High-risk legal questions are one semantic unit. Splitting them
-        # into fragments (for example, “5 năm liên tục” and “cùng chi trả”)
-        # and merging independently ranked bundles can discard the clause
-        # that satisfies both conditions. Preserve the complete question so
-        # lexical, semantic and operative retrieval are fused once.
-        bundle = await runtime.retrieve_bundle(query)
-    elif get_settings().query_rewrite_enabled:
-        bundle = await runtime.retrieve_bundle_adaptive(query)
-    elif len(subqueries) > 1:
-        bundle = await runtime.retrieve_bundle_many(subqueries)
-    else:
-        bundle = await runtime.retrieve_bundle(query)
-    evidence, relations = bundle.evidence, bundle.relations
-    metadata_shortcut = bool(
-        bundle.direct_response
-        and bundle.direct_citations
-        and all(
-            citation.evidence_kind == "document_metadata"
-            and citation.provenance_verified
-            for citation in bundle.direct_citations
+    async with trace_span("node-retrieve-vectors", input={"query": query}) as span:
+        runtime = get_runtime()
+        subqueries = decompose_query(query)
+        # Adaptive retrieval preserves the complete user question and pairs it
+        # with a clause-shaped rewrite. Running deterministic decomposition first
+        # used to discard cross-condition facts (e.g. “mức đóng *và* hỗ trợ”),
+        # bypassing both HyDE and the current-law reranker.
+        if requires_evidence_verification(query):
+            # High-risk legal questions are one semantic unit. Splitting them
+            # into fragments (for example, “5 năm liên tục” and “cùng chi trả”)
+            # and merging independently ranked bundles can discard the clause
+            # that satisfies both conditions. Preserve the complete question so
+            # lexical, semantic and operative retrieval are fused once.
+            bundle = await runtime.retrieve_bundle(query)
+        elif get_settings().query_rewrite_enabled:
+            bundle = await runtime.retrieve_bundle_adaptive(query)
+        elif len(subqueries) > 1:
+            bundle = await runtime.retrieve_bundle_many(subqueries)
+        else:
+            bundle = await runtime.retrieve_bundle(query)
+        evidence, relations = bundle.evidence, bundle.relations
+        metadata_shortcut = bool(
+            bundle.direct_response
+            and bundle.direct_citations
+            and all(
+                citation.evidence_kind == "document_metadata"
+                and citation.provenance_verified
+                for citation in bundle.direct_citations
+            )
         )
-    )
-    return {
-        "vector_results": [item for item in evidence if "semantic" in item.channels],
-        "graph_results": relations,
-        "retrieved_evidence": evidence,
-        # Direct responses are metadata/lookup shortcuts. For high-risk
-        # legal questions, always pass evidence through the source extractor
-        # and guardrail so required conditions cannot be hidden in a provider
-        # shortcut.
-        "response": (
+        resp = (
             bundle.direct_response
             if (not requires_evidence_verification(query) or metadata_shortcut)
             else ""
-        ),
-        "direct_citations": bundle.direct_citations or [],
-    }
+        )
+        if span is not None:
+            span.update(
+                output={
+                    "evidence_count": len(evidence),
+                    "relation_count": len(relations),
+                    "direct_response": bool(resp),
+                    "top_documents": list(dict.fromkeys(item.title for item in evidence[:4])),
+                }
+            )
+        return {
+            "vector_results": [item for item in evidence if "semantic" in item.channels],
+            "graph_results": relations,
+            "retrieved_evidence": evidence,
+            "response": resp,
+            "direct_citations": bundle.direct_citations or [],
+        }
 
 
 def _relation_context(relation: Relation) -> str:
@@ -120,15 +137,23 @@ def _relation_context(relation: Relation) -> str:
 async def assemble_context_node(state: AgentState) -> dict:
     evidence: list[RetrievalResult] = state.get("retrieved_evidence", [])
     relations: list[Relation] = state.get("graph_results", [])
-    settings = get_settings()
-    context = _pack_context(
-        evidence,
-        relations,
-        settings.max_context_chars,
-        token_budget=settings.max_context_tokens,
-        model=settings.model_name,
-    )
-    return {"context": context}
+    async with trace_span("node-assemble-context", input={"evidence_count": len(evidence), "relation_count": len(relations)}) as span:
+        settings = get_settings()
+        context = _pack_context(
+            evidence,
+            relations,
+            settings.max_context_chars,
+            token_budget=settings.max_context_tokens,
+            model=settings.model_name,
+        )
+        if span is not None:
+            span.update(
+                output={
+                    "context_length": len(context),
+                    "context_preview": context[:400] if context else "",
+                }
+            )
+        return {"context": context}
 
 
 def _pack_context(
@@ -220,19 +245,37 @@ async def verify_evidence_node(state: AgentState) -> dict:
     query = state.get("query", "")
     evidence: list[RetrievalResult] = state.get("retrieved_evidence", [])
     direct_citations: list[Citation] = state.get("direct_citations", [])
-    if not requires_evidence_verification(query):
+    async with trace_span(
+        "node-verify-evidence",
+        input={
+            "query": query,
+            "evidence_count": len(evidence),
+            "requires_verification": requires_evidence_verification(query),
+        },
+    ) as span:
+        if not requires_evidence_verification(query):
+            if span is not None:
+                span.update(output={"verification_failed": False, "reason": "not_high_risk"})
+            return {"verification_failed": False}
+        valid = [
+            item for item in evidence
+            if item.dataset_id and item.document_id and item.source_start is not None and item.source_end is not None
+        ]
+        official_status = any(
+            citation.evidence_kind == "document_metadata" and citation.provenance_verified
+            for citation in direct_citations
+        )
+        if not valid and not official_status:
+            if span is not None:
+                span.update(
+                    level="WARNING",
+                    status_message="Verification failed: no release-scoped evidence survived for high-risk query",
+                    output={"verification_failed": True, "reason": "unverified"},
+                )
+            return {"verification_failed": True, "response": no_answer_response(query, reason="unverified")}
+        if span is not None:
+            span.update(output={"verification_failed": False, "valid_evidence_count": len(valid)})
         return {"verification_failed": False}
-    valid = [
-        item for item in evidence
-        if item.dataset_id and item.document_id and item.source_start is not None and item.source_end is not None
-    ]
-    official_status = any(
-        citation.evidence_kind == "document_metadata" and citation.provenance_verified
-        for citation in direct_citations
-    )
-    if not valid and not official_status:
-        return {"verification_failed": True, "response": no_answer_response(query, reason="unverified")}
-    return {"verification_failed": False}
 
 
 def compose_source_answer(*args, **kwargs):
@@ -241,15 +284,36 @@ def compose_source_answer(*args, **kwargs):
 
 
 async def generate_node(state: AgentState) -> dict:
-    if state.get("response"):
-        return {"response": state["response"]}
-    evidence: list[RetrievalResult] = state.get("retrieved_evidence", [])
-    if not evidence:
-        return {"response": no_answer_response(state.get("query", ""))}
-    response = await get_runtime().generate(state.get("query", ""), state.get("context", ""))
-    if response.strip().startswith("Hiện tại hệ thống không tìm thấy thông tin hoặc văn bản pháp lý phù hợp"):
-        return {"response": NO_EVIDENCE_RESPONSE}
-    return {"response": response}
+    async with trace_span(
+        "node-generate",
+        input={"query": state.get("query", ""), "has_existing_response": bool(state.get("response"))},
+    ) as span:
+        if state.get("response"):
+            if span is not None:
+                span.update(output={"response": state["response"], "source": "pre-existing"})
+            return {"response": state["response"]}
+        evidence: list[RetrievalResult] = state.get("retrieved_evidence", [])
+        if not evidence:
+            resp = no_answer_response(state.get("query", ""))
+            if span is not None:
+                span.update(
+                    level="WARNING",
+                    status_message="No evidence available in state, returning fallback",
+                    output={"response": resp, "source": "no_evidence_fallback"},
+                )
+            return {"response": resp}
+        response = await get_runtime().generate(state.get("query", ""), state.get("context", ""))
+        is_fallback = response.strip().startswith("Hiện tại hệ thống không tìm thấy thông tin hoặc văn bản pháp lý phù hợp")
+        final_resp = NO_EVIDENCE_RESPONSE if is_fallback else response
+        if span is not None:
+            span.update(
+                output={
+                    "response": final_resp,
+                    "is_fallback": is_fallback,
+                    "response_length": len(final_resp),
+                }
+            )
+        return {"response": final_resp}
 
 
 def _deterministic_source_rule_response(
@@ -649,56 +713,77 @@ def _normalize_response(value: object) -> str:
 
 async def guardrail_node(state: AgentState) -> dict:
     evidence = state.get("retrieved_evidence", [])
-    response = _sanitize_output(_normalize_response(state.get("response", "")), evidence)
-    if not response:
-        response = NO_EVIDENCE_RESPONSE
-    if (
-        "học sinh" in state.get("query", "").casefold()
-        and "hỗ trợ" in state.get("query", "").casefold()
-        and response != NO_EVIDENCE_RESPONSE
-    ):
-        response = (
-            f"{response.rstrip()}\n"
-            "- Năm 2026; mức đóng hoặc điều kiện xác định mức đóng được đối chiếu theo mức tham chiếu.\n"
-            "- Hỗ trợ của Nhà nước áp dụng theo nhóm đối tượng; chưa đủ dữ liệu để xác định số tiền cụ thể."
+    async with trace_span("node-guardrail", input={"query": state.get("query", ""), "evidence_count": len(evidence)}) as span:
+        response = _sanitize_output(_normalize_response(state.get("response", "")), evidence)
+        if not response:
+            response = NO_EVIDENCE_RESPONSE
+        if (
+            "học sinh" in state.get("query", "").casefold()
+            and "hỗ trợ" in state.get("query", "").casefold()
+            and response != NO_EVIDENCE_RESPONSE
+        ):
+            response = (
+                f"{response.rstrip()}\n"
+                "- Năm 2026; mức đóng hoặc điều kiện xác định mức đóng được đối chiếu theo mức tham chiếu.\n"
+                "- Hỗ trợ của Nhà nước áp dụng theo nhóm đối tượng; chưa đủ dữ liệu để xác định số tiền cụ thể."
+            )
+        # Extractive/deterministic responses are built from the final evidence
+        # list. A direct-citation shortcut may belong to an earlier document
+        # anchor and causes the claim auditor to discard the correct sentence
+        # during the guardrail pass. Rebuild citations from the same evidence for
+        # source-derived output; reserve direct citations for provider answers.
+        deterministic_response = response.startswith("-") or response.startswith("Các điều/khoản")
+        citations = (
+            _citations_from_evidence(evidence, preserve_order=deterministic_response)
+            if (evidence or deterministic_response)
+            else state.get("direct_citations") or []
         )
-    # Extractive/deterministic responses are built from the final evidence
-    # list. A direct-citation shortcut may belong to an earlier document
-    # anchor and causes the claim auditor to discard the correct sentence
-    # during the guardrail pass. Rebuild citations from the same evidence for
-    # source-derived output; reserve direct citations for provider answers.
-    deterministic_response = response.startswith("-") or response.startswith("Các điều/khoản")
-    citations = (
-        _citations_from_evidence(evidence, preserve_order=deterministic_response)
-        if (evidence or deterministic_response)
-        else state.get("direct_citations") or []
-    )
-    claims = _audit_claims(response, citations, state.get("query", ""))
+        claims = _audit_claims(response, citations, state.get("query", ""))
 
-    supported_ids = {
-        evidence_id
-        for claim in claims
-        if claim.get("verification") in ("entailed", "partial")
-        for evidence_id in claim.get("evidence_ids", [])
-    }
+        supported_ids = {
+            evidence_id
+            for claim in claims
+            if claim.get("verification") in ("entailed", "partial")
+            for evidence_id in claim.get("evidence_ids", [])
+        }
 
-    if supported_ids:
-        from src.config import get_settings
-        citations = [citation for citation in citations if citation.chunk_id in supported_ids][: get_settings().max_citations]
-    elif (
-        response == NO_EVIDENCE_RESPONSE
-        or requires_evidence_verification(state.get("query", ""))
-        or state.get("direct_citations")
-    ):
-        response = NO_EVIDENCE_RESPONSE
-        citations = []
-        claims = []
-    else:
-        from src.config import get_settings
-        citations = citations[: get_settings().max_citations]
+        entailed_count = sum(1 for c in claims if c.get("verification") == "entailed")
+        partial_count = sum(1 for c in claims if c.get("verification") == "partial")
+        unsupported_count = sum(1 for c in claims if c.get("verification") == "unsupported")
 
-    return {
-        "response": response,
-        "citations": [citation.model_dump() for citation in citations],
-        "claims": claims,
-    }
+        initial_response = response
+        if supported_ids:
+            from src.config import get_settings
+            citations = [citation for citation in citations if citation.chunk_id in supported_ids][: get_settings().max_citations]
+        elif (
+            response == NO_EVIDENCE_RESPONSE
+            or requires_evidence_verification(state.get("query", ""))
+            or state.get("direct_citations")
+        ):
+            response = NO_EVIDENCE_RESPONSE
+            citations = []
+            claims = []
+        else:
+            from src.config import get_settings
+            citations = citations[: get_settings().max_citations]
+
+        if span is not None:
+            span.update(
+                output={
+                    "final_response": response,
+                    "citation_count": len(citations),
+                    "claim_audit": {
+                        "total_claims": len(claims),
+                        "entailed": entailed_count,
+                        "partial": partial_count,
+                        "unsupported": unsupported_count,
+                    },
+                    "was_overridden_to_fallback": (initial_response != NO_EVIDENCE_RESPONSE and response == NO_EVIDENCE_RESPONSE),
+                }
+            )
+
+        return {
+            "response": response,
+            "citations": [citation.model_dump() for citation in citations],
+            "claims": claims,
+        }

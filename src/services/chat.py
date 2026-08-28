@@ -171,12 +171,6 @@ class GraphRagRuntime:
             return_exceptions=True,
         )
         valid = [item for item in (original, expanded) if isinstance(item, RetrievalBundle)]
-        if len(valid) < 2:
-            # A cancelled asyncpg operation can leave a pooled connection in
-            # an uncertain transaction state. Reset the local pool only after
-            # both adaptive branches have finished, so a timed-out branch
-            # cannot poison the next benchmark/request.
-            await dispose_database()
         if not valid:
             first_error = original if isinstance(original, BaseException) else expanded
             raise first_error
@@ -298,16 +292,29 @@ class GraphRagRuntime:
         cached = self._rewrite_cache.get(key)
         if cached and now - cached[1] < 300:
             return cached[0]
-        rewritten = await self._provider_call(
-            "query_rewrite",
-            self._rewrite_breaker,
-            lambda: rewrite_retrieval_query(query),
-        )
-        if len(self._rewrite_cache) >= 256:
-            oldest = min(self._rewrite_cache, key=lambda item: self._rewrite_cache[item][1])
-            self._rewrite_cache.pop(oldest, None)
-        self._rewrite_cache[key] = (rewritten, now)
-        return rewritten
+        async with trace_span(
+            "query-rewrite",
+            as_type="span",
+            input={"original_query": query},
+            metadata={"model": settings.model_name},
+        ) as rw_span:
+            rewritten = await self._provider_call(
+                "query_rewrite",
+                self._rewrite_breaker,
+                lambda: rewrite_retrieval_query(query),
+            )
+            if rw_span is not None:
+                rw_span.update(
+                    output={
+                        "rewritten_query": rewritten,
+                        "unchanged": rewritten.strip().casefold() == query.strip().casefold(),
+                    }
+                )
+            if len(self._rewrite_cache) >= 256:
+                oldest = min(self._rewrite_cache, key=lambda item: self._rewrite_cache[item][1])
+                self._rewrite_cache.pop(oldest, None)
+            self._rewrite_cache[key] = (rewritten, now)
+            return rewritten
 
     async def retrieve_bundle(self, query: str) -> RetrievalBundle:
         started = time.perf_counter()
@@ -350,7 +357,6 @@ class GraphRagRuntime:
             except TimeoutError as exc:
                 metrics.inc("retrieval_requests_total", mode="provider", outcome="timeout")
                 metrics.observe("retrieval_duration_seconds", time.perf_counter() - started, mode="provider")
-                await dispose_database()
                 raise GraphRagUnavailableError("Retrieval deadline exceeded") from exc
             except Exception:
                 metrics.inc("retrieval_requests_total", mode="provider", outcome="error")
@@ -547,20 +553,34 @@ class GraphRagRuntime:
         async def lexical_search(
             *, dataset_id: str, document_ids: Sequence[str] | None = None, limit: int
         ) -> list[RetrievalResult]:
-            query_variants = expand_query_variants(query)
-            async with session_scope() as lexical_session:
-                repo = GraphRepository(lexical_session)
-                all_hits: list[RetrievalResult] = []
-                seen_chunks: set[str] = set()
-                for q in query_variants:
-                    hits = await repo.search_lexical(
-                        q, dataset_id=dataset_id, document_ids=document_ids, limit=limit
-                    )
-                    for hit in hits:
-                        if hit.chunk_id not in seen_chunks:
-                            seen_chunks.add(hit.chunk_id)
-                            all_hits.append(hit)
-                return all_hits[:limit]
+            async with trace_span(
+                "lexical-search-postgres",
+                as_type="retriever",
+                input={"query": query, "dataset_id": dataset_id, "document_ids": document_ids, "limit": limit},
+            ) as lex_span:
+                query_variants = expand_query_variants(query)
+                async with session_scope() as lexical_session:
+                    repo = GraphRepository(lexical_session)
+                    all_hits: list[RetrievalResult] = []
+                    seen_chunks: set[str] = set()
+                    for q in query_variants:
+                        hits = await repo.search_lexical(
+                            q, dataset_id=dataset_id, document_ids=document_ids, limit=limit
+                        )
+                        for hit in hits:
+                            if hit.chunk_id not in seen_chunks:
+                                seen_chunks.add(hit.chunk_id)
+                                all_hits.append(hit)
+                    result = all_hits[:limit]
+                    if lex_span is not None:
+                        lex_span.update(
+                            output={
+                                "hit_count": len(result),
+                                "chunk_ids": [h.chunk_id for h in result[:6]],
+                                "documents": list(dict.fromkeys(h.title for h in result[:4])),
+                            }
+                        )
+                    return result
 
         try:
             # Phase 1: release metadata, exact lookup and PageIndex. This
@@ -1771,8 +1791,12 @@ class GraphRagRuntime:
         async with trace_span(
             "llm-generate",
             as_type="generation",
-            input={"query": query, "context_length": len(context)},
-            metadata={"model": settings.model_name},
+            input={
+                "query": query,
+                "context_length": len(context),
+                "context_preview": context[:500] if context else "",
+            },
+            metadata={"model": settings.model_name, "timeout_seconds": settings.llm_timeout_seconds},
         ) as gen_span:
             try:
                 llm = get_llm()
@@ -1795,10 +1819,26 @@ class GraphRagRuntime:
             except TimeoutError:
                 metrics.inc("generation_requests_total", outcome="timeout")
                 metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="timeout")
+                if gen_span is not None:
+                    gen_span.update(
+                        level="ERROR",
+                        status_message=f"LLM TimeoutError: generation exceeded {settings.llm_timeout_seconds}s limit",
+                        output={
+                            "error": f"LLM generation timed out after {settings.llm_timeout_seconds}s",
+                            "model": settings.model_name,
+                            "fallback_used": True,
+                        },
+                    )
                 return NO_EVIDENCE_RESPONSE
             except Exception as exc:
                 metrics.inc("generation_requests_total", outcome="error")
                 metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="error")
+                if gen_span is not None:
+                    gen_span.update(
+                        level="ERROR",
+                        status_message=f"LLM Error: {type(exc).__name__}: {str(exc)}",
+                        output={"error": str(exc), "error_type": type(exc).__name__},
+                    )
                 raise ChatProviderError("Chat provider failed") from exc
             content = result.content
             if isinstance(content, str):
@@ -1807,7 +1847,13 @@ class GraphRagRuntime:
                 if current_release and context and cache_allowed and content:
                     self._store_answer_cache(answer_key, content)
                 if gen_span is not None:
-                    gen_span.update(output={"response": content})
+                    gen_span.update(
+                        output={
+                            "response": content,
+                            "response_length": len(content),
+                            "model": settings.model_name,
+                        }
+                    )
                 return content
             if isinstance(content, Sequence):
                 value = "".join(
@@ -1820,7 +1866,13 @@ class GraphRagRuntime:
                 if current_release and context and cache_allowed and value:
                     self._store_answer_cache(answer_key, value)
                 if gen_span is not None:
-                    gen_span.update(output={"response": value})
+                    gen_span.update(
+                        output={
+                            "response": value,
+                            "response_length": len(value),
+                            "model": settings.model_name,
+                        }
+                    )
                 return value
             metrics.inc("generation_requests_total", outcome="empty")
             metrics.observe("generation_duration_seconds", time.perf_counter() - started, outcome="empty")
