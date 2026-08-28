@@ -630,7 +630,8 @@ class GraphRepository:
                       AND c.lexical_eligible IS TRUE
                       AND c.search_vector @@ to_tsquery('simple', :disjunction)
                     GROUP BY c.document_id
-                    LIMIT 64
+                    ORDER BY count(*) DESC
+                    LIMIT 128
                 ), ranked AS (
                     SELECT d.id AS document_id,
                        max(
@@ -680,6 +681,42 @@ class GraphRepository:
             },
         )
         return [str(row.document_id) for row in result]
+
+    async def search_title_documents(
+        self, query: str, *, dataset_id: str, limit: int = 8
+    ) -> list[str]:
+        """Search documents whose title matches key legal terms or numbers."""
+        needle = query.strip()
+        if not needle or limit <= 0:
+            return []
+        disjunction = lexical_disjunction(needle, limit=8)
+        result = await self.session.execute(
+            text(
+                """
+                SELECT id FROM documents
+                WHERE dataset_id = :dataset_id
+                  AND NOT is_external
+                  AND COALESCE((payload -> 'metadata' ->> 'answer_ready')::boolean, FALSE) IS TRUE
+                  AND (
+                      (CAST(:disjunction AS text) != '' AND to_tsvector('simple', title) @@ to_tsquery('simple', :disjunction))
+                      OR title ILIKE '%bảo hiểm y tế%'
+                      OR title ILIKE '%luật bảo hiểm y tế%'
+                  )
+                ORDER BY
+                    CASE
+                        WHEN COALESCE(payload -> 'metadata' ->> 'loai_van_ban', '') ILIKE '%luật%' OR title ILIKE 'luật %' THEN 4
+                        WHEN COALESCE(payload -> 'metadata' ->> 'loai_van_ban', '') ILIKE '%nghị định%' OR title ILIKE 'nghị định %' THEN 3
+                        WHEN title ILIKE 'văn bản hợp nhất%' THEN 2
+                        WHEN title ILIKE 'thông tư%' THEN 1
+                        ELSE 0
+                    END DESC,
+                    id
+                LIMIT :limit
+                """
+            ),
+            {"dataset_id": dataset_id, "disjunction": disjunction or "", "limit": limit},
+        )
+        return [str(row.id) for row in result]
 
     async def resolve_legal_units(
         self, labels: Sequence[str], *, dataset_id: str, document_ids: Sequence[str], limit: int = 8

@@ -497,8 +497,7 @@ def rerank_legal_candidates(
         # generic administrative passages over a short governing statute.
         # Keep it bounded before applying source authority/currentness so the
         # legal ranker, rather than term-count magnitude, decides the winner.
-        if any(channel in item.channels for channel in ("document_operatives", "document_recall_operatives")):
-            raw_score = min(raw_score, 2.0)
+        raw_score = min(float(item.score), 2.0)
         # Coverage is a bounded tie-breaker over semantic relevance, not an
         # independent legal conclusion.  It prevents a single generic term
         # from dominating a multi-condition query.
@@ -531,38 +530,41 @@ def rerank_legal_candidates(
         recency_bonus = 0.0
         if not historical_query and publication_year:
             recency_bonus = 0.20 * max(0.0, min(1.0, (publication_year - 1990) / 40))
-        # For a question explicitly about the current regime, an old document
-        # whose status cannot be tied to an official source is still useful
-        # historical context, but cannot compete with an official current
-        # source merely because it repeats more query words.  Explicit
-        # document-number lookups are exempt: those ask about that document.
-        currentness_penalty = 0.0
-        if asks_current and not extract_document_numbers(query):
-            if not item.legal_status_verified and publication_year and publication_year < 2024:
-                currentness_penalty = -0.22
-            elif not item.legal_status_verified:
-                currentness_penalty = -0.08
-            # An old source that claims to be active can still be relevant,
-            # but should not displace a newer primary law/decree for a query
-            # explicitly about the present regime. This is a rank penalty,
-            # not an exclusion, so a genuinely still-operative old rule can
-            # remain available when no newer source answers the question.
-            elif publication_year and publication_year < 2024:
-                currentness_penalty = -0.16
         authority = " ".join((item.document_type, item.title)).casefold()
         authority_bonus = 0.0
         title = item.title.strip().casefold()
         document_type = item.document_type.strip().casefold()
         if "luật" in document_type or title.startswith(("luật ", "bộ luật ")):
-            authority_bonus = 0.35
+            authority_bonus = 0.40
         elif "nghị định" in document_type or title.startswith("nghị định"):
-            authority_bonus = 0.25
+            authority_bonus = 0.30
         elif "văn bản hợp nhất" in authority:
-            authority_bonus = 0.20
+            authority_bonus = 0.25
         elif any(value in authority for value in ("thông tư", "nghị quyết")):
-            authority_bonus = 0.12
+            authority_bonus = 0.15
         elif "quyết định" in authority:
             authority_bonus = 0.05
+
+        currentness_penalty = 0.0
+        is_primary_statute = (
+            "luật" in document_type
+            or title.startswith(("luật ", "bộ luật ", "nghị định", "văn bản hợp nhất", "thông tư"))
+        )
+        if asks_current and not extract_document_numbers(query) and not is_primary_statute:
+            if not item.legal_status_verified and publication_year and publication_year < 2024:
+                currentness_penalty = -0.22
+            elif not item.legal_status_verified:
+                currentness_penalty = -0.08
+            elif publication_year and publication_year < 2024:
+                currentness_penalty = -0.16
+
+        local_penalty = 0.0
+        issuer_str = " ".join((item.issuer or "", item.jurisdiction or "", item.title or "")).casefold()
+        is_local = any(kw in issuer_str for kw in ("ubnd", "hđnd", "ninh thuận", "quảng ngãi", "thái nguyên", "bình định"))
+        query_mentions_local = any(kw in query.casefold() for kw in ("ninh thuận", "quảng ngãi", "thái nguyên", "bình định"))
+        if is_local and not query_mentions_local:
+            local_penalty = -0.60
+
         rerank_score = (
             raw_score
             + 0.16 * token_coverage
@@ -574,6 +576,7 @@ def rerank_legal_candidates(
             + recency_bonus
             + authority_bonus
             + currentness_penalty
+            + local_penalty
         )
         item.score = rerank_score
         item.rank_details = {
