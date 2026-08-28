@@ -79,15 +79,10 @@ async def retrieve_vectors_node(state: AgentState) -> dict:
         # with a clause-shaped rewrite. Running deterministic decomposition first
         # used to discard cross-condition facts (e.g. “mức đóng *và* hỗ trợ”),
         # bypassing both HyDE and the current-law reranker.
-        if requires_evidence_verification(query):
-            # High-risk legal questions are one semantic unit. Splitting them
-            # into fragments (for example, “5 năm liên tục” and “cùng chi trả”)
-            # and merging independently ranked bundles can discard the clause
-            # that satisfies both conditions. Preserve the complete question so
-            # lexical, semantic and operative retrieval are fused once.
-            bundle = await runtime.retrieve_bundle(query)
-        elif get_settings().query_rewrite_enabled:
+        if get_settings().query_rewrite_enabled:
             bundle = await runtime.retrieve_bundle_adaptive(query)
+        elif requires_evidence_verification(query):
+            bundle = await runtime.retrieve_bundle(query)
         elif len(subqueries) > 1:
             bundle = await runtime.retrieve_bundle_many(subqueries)
         else:
