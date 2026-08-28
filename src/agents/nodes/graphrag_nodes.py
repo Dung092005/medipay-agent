@@ -259,7 +259,7 @@ async def verify_evidence_node(state: AgentState) -> dict:
             return {"verification_failed": False}
         valid = [
             item for item in evidence
-            if item.dataset_id and item.document_id and item.source_start is not None and item.source_end is not None
+            if item.document_id and (item.content or item.section_title)
         ]
         official_status = any(
             citation.evidence_kind == "document_metadata" and citation.provenance_verified
@@ -717,6 +717,7 @@ async def guardrail_node(state: AgentState) -> dict:
         response = _sanitize_output(_normalize_response(state.get("response", "")), evidence)
         if not response:
             response = NO_EVIDENCE_RESPONSE
+        initial_response = response
         if (
             "học sinh" in state.get("query", "").casefold()
             and "hỗ trợ" in state.get("query", "").casefold()
@@ -751,21 +752,16 @@ async def guardrail_node(state: AgentState) -> dict:
         partial_count = sum(1 for c in claims if c.get("verification") == "partial")
         unsupported_count = sum(1 for c in claims if c.get("verification") == "unsupported")
 
-        initial_response = response
         if supported_ids:
             from src.config import get_settings
             citations = [citation for citation in citations if citation.chunk_id in supported_ids][: get_settings().max_citations]
-        elif (
-            response == NO_EVIDENCE_RESPONSE
-            or requires_evidence_verification(state.get("query", ""))
-            or state.get("direct_citations")
-        ):
+        elif response != NO_EVIDENCE_RESPONSE and not response.strip().startswith("Hiện tại hệ thống không tìm thấy"):
+            from src.config import get_settings
+            citations = citations[: get_settings().max_citations]
+        else:
             response = NO_EVIDENCE_RESPONSE
             citations = []
             claims = []
-        else:
-            from src.config import get_settings
-            citations = citations[: get_settings().max_citations]
 
         if span is not None:
             span.update(

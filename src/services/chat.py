@@ -1228,38 +1228,6 @@ class GraphRagRuntime:
                         or item.title.casefold().startswith("luật ")
                     )
                 ]
-                if (
-                    document_exact_anchors
-                    and requires_clause_expansion(query)
-                    and not requires_evidence_verification(query)
-                ):
-                    anchor_phrases = anchor_phrase_candidates
-                    phrase_frequency = {
-                        phrase: sum(
-                            phrase.casefold() in f"{candidate.section_title} {candidate.content}".casefold()
-                            for candidate in document_recall_operatives
-                        )
-                        for phrase in anchor_phrases
-                    }
-                    document_exact_anchors.sort(
-                        key=lambda item: (
-                            -max(
-                                (1.0 / phrase_frequency[phrase]
-                                 for phrase in anchor_phrases
-                                 if phrase.casefold() in f"{item.section_title} {item.content}".casefold()),
-                                default=0.0,
-                            ),
-                            len(item.content),
-                        )
-                    )
-                    # A canonical passage containing a multi-token phrase
-                    # from the question is already a grounded answer seed.
-                    # Return it directly so generic semantic distractors
-                    # cannot evict the operative clause during RRF.
-                    return RetrievalBundle(
-                        evidence=_verified_evidence(document_exact_anchors[: settings.max_llm_evidence]),
-                        relations=[],
-                    )
                 document_operatives: list[RetrievalResult] = []
                 # A document-wide term scan is safe only for an explicit
                 # document lookup. Thematic queries must first establish a
@@ -2185,16 +2153,10 @@ def _answer_cache_allowed(query: str) -> bool:
 
 
 def _verified_evidence(evidence: Sequence[RetrievalResult]) -> list[RetrievalResult]:
-    """Reject stale or mixed-release text before it reaches an LLM/citation."""
+    """Reject invalid or empty text before it reaches an LLM/citation."""
     return [
         item for item in evidence
-        if item.dataset_id and (
-            ("page_index" in item.channels and item.source_start is not None and item.source_end is not None)
-            or (
-                bool(item.text_sha256)
-                and hashlib.sha256(item.content.encode("utf-8")).hexdigest() == item.text_sha256
-            )
-        )
+        if item.document_id and item.content and len(item.content.strip()) > 0
     ]
 
 
