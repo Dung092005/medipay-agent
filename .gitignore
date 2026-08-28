@@ -17,6 +17,8 @@ env/
 .env
 .env.local
 .env.production
+google_credentials.json
+*.json.key
 
 # IDE
 .vscode/
