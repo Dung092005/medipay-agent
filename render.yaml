@@ -14,7 +14,7 @@ services:
       - key: APP_HOST
         value: 0.0.0.0
       - key: CORS_ORIGINS
-        sync: false
+        value: "https://medipay-web-ui.onrender.com,http://localhost:3000"
       - key: DATABASE_URL
         sync: false
       - key: RUNTIME_DATABASE_URL
