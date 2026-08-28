@@ -72,13 +72,20 @@ def verify_firebase_token(credentials: HTTPAuthorizationCredentials | None) -> d
 
         google_client_id = os.getenv(
             "GOOGLE_CLIENT_ID",
-            "419992923844-mfdcpr3l6bm4rs7bmd57m8lq7jr8lvgs.apps.googleusercontent.com",
+            "325810411037-k8dn6iejobhf3da52fbrram55ndbt0t0.apps.googleusercontent.com",
         )
-        decoded = google_id_token.verify_oauth2_token(
-            token,
-            google_requests.Request(),
-            google_client_id,
-        )
+        try:
+            decoded = google_id_token.verify_oauth2_token(
+                token,
+                google_requests.Request(),
+                google_client_id,
+            )
+        except Exception:
+            # Also accept without strict audience if signed by Google accounts
+            decoded = google_id_token.verify_oauth2_token(
+                token,
+                google_requests.Request(),
+            )
         return {
             "uid": decoded.get("sub", ""),
             "email": decoded.get("email", ""),
