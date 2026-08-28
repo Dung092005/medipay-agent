@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://openrouter.ai/api/v1"
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     llm_timeout_seconds: float = Field(default=45.0, gt=0)
-    llm_max_output_tokens: int = Field(default=900, ge=64, le=4_096)
+    llm_max_output_tokens: int = Field(default=4000, ge=64, le=16_384)
     query_rewrite_max_tokens: int = Field(default=180, ge=64, le=512)
     query_rewrite_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
     embedding_provider: str = "openrouter"

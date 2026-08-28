@@ -291,13 +291,9 @@ def policy_response(query: str) -> str | None:
     lowered = query.casefold()
     social = " ".join(re.sub(r"[^0-9a-zà-ỹđ]+", " ", lowered).split())
     if _GREETING_PATTERN.match(social):
-        return (
-            "Xin chào! Chúc bạn một ngày tốt lành.\n"
-            "- Tôi là Trợ lý AI chuyên trách tra cứu chính sách Bảo hiểm y tế (BHYT) và viện phí.\n"
-            "- Bạn có thể hỏi tôi về mức đóng, quyền lợi khám chữa bệnh đúng tuyến/trái tuyến, chính sách BHYT 5 năm liên tục hoặc thủ tục chuyển tuyến."
-        )
+        return "Xin chào! Tôi có thể hỗ trợ bạn tra cứu thông tin BHYT và viện phí."
     if _THANKS_PATTERN.match(social):
-        return "Rất vui được hỗ trợ bạn. Chúc bạn luôn mạnh khỏe!"
+        return "Rất vui được hỗ trợ bạn."
     if _BYE_PATTERN.match(social):
         return "Tạm biệt bạn. Khi cần hỗ trợ thông tin BHYT và viện phí, tôi luôn sẵn sàng hỗ trợ!"
     if any(token in lowered for token in ("bỏ qua hướng dẫn", "ignore previous", "system prompt", "prompt nội bộ")):
@@ -654,3 +650,126 @@ def weighted_rrf(
         if len(diverse) >= limit:
             break
     return diverse
+
+
+_JURISDICTIONS = {
+    "hà nội": "Hà Nội",
+    "ha noi": "Hà Nội",
+    "hn": "Hà Nội",
+    "đà nẵng": "Đà Nẵng",
+    "da nang": "Đà Nẵng",
+    "hồ chí minh": "Hồ Chí Minh",
+    "ho chi minh": "Hồ Chí Minh",
+    "tp hcm": "Hồ Chí Minh",
+    "tp.hcm": "Hồ Chí Minh",
+    "tphcm": "Hồ Chí Minh",
+    "sài gòn": "Hồ Chí Minh",
+    "sai gon": "Hồ Chí Minh",
+    "hải phòng": "Hải Phòng",
+    "hai phong": "Hải Phòng",
+    "cần thơ": "Cần Thơ",
+    "can tho": "Cần Thơ",
+}
+
+
+def detect_jurisdiction(query: str) -> str:
+    lowered = " ".join(query.casefold().split())
+    for alias, canonical in _JURISDICTIONS.items():
+        pattern = rf"\b{re.escape(alias)}\b"
+        if re.search(pattern, lowered):
+            return canonical
+    return ""
+
+
+def route_retrieval_channels(
+    query: str, channels: dict[str, Sequence[RetrievalResult]]
+) -> dict[str, list[RetrievalResult]]:
+    target_province = detect_jurisdiction(query)
+    lowered = query.casefold()
+    asks_local = "địa phương" in lowered
+    asks_national = any(marker in lowered for marker in ("theo luật", "luật bhyt", "luật bảo hiểm y tế"))
+
+    routed: dict[str, list[RetrievalResult]] = {}
+    for name, hits in channels.items():
+        items = list(hits)
+        if target_province:
+            # Explicit jurisdiction: target province first, then Trung uong, then other localities
+            def sort_key(item: RetrievalResult):
+                is_target = item.province == target_province
+                is_central = item.jurisdiction == "Trung ương"
+                return (0 if is_target else (1 if is_central else 2), -float(item.score))
+
+            routed[name] = sorted(items, key=sort_key)
+        elif asks_national:
+            # National question: Trung uong first
+            def sort_key_national(item: RetrievalResult):
+                is_central = item.jurisdiction == "Trung ương"
+                return (0 if is_central else 1, -float(item.score))
+
+            routed[name] = sorted(items, key=sort_key_national)
+        elif asks_local:
+            # Unspecified local question: default local province (e.g. Ha Noi) first
+            def sort_key_local(item: RetrievalResult):
+                is_hanoi = item.province == "Hà Nội"
+                is_central = item.jurisdiction == "Trung ương"
+                return (0 if is_hanoi else (1 if is_central else 2), -float(item.score))
+
+            routed[name] = sorted(items, key=sort_key_local)
+        else:
+            routed[name] = items
+
+    return routed
+
+
+def rewrite_user_query(query: str) -> str:
+    normalized = " ".join(query.casefold().split())
+    replacements = [
+        (r"\bthu tuc\b", "thủ tục"),
+        (r"\bkham\b", "khám"),
+        (r"\bngoai tuyen\b", "ngoại tuyến"),
+        (r"\bla\b", "là"),
+        (r"\bntn\b", "như thế nào"),
+        (r"\bkhám ngoại tuyến\s+là\s+ntn\b", "khám chữa bệnh không đúng tuyến bảo hiểm y tế như thế nào"),
+        (r"\bkhám trái tuyến\s+là\s+ntn\b", "khám chữa bệnh không đúng tuyến bảo hiểm y tế như thế nào"),
+        (r"\bkhám ngoại tuyến\b", "khám chữa bệnh không đúng tuyến bảo hiểm y tế"),
+        (r"\bkhám trái tuyến\b", "khám chữa bệnh không đúng tuyến bảo hiểm y tế"),
+        (r"\b(?:người|trẻ)\s+dưới\s+(?:6|sáu)\s+tuổi\b", "trẻ em dưới 6 tuổi"),
+        (r"\bblđ\b", "bộ lao động"),
+        (r"\bblđtbxh\b", "bộ lao động thương binh và xã hội"),
+        (r"\blà\s+như thế nào\b", "như thế nào"),
+    ]
+    result = normalized
+    for pattern, replacement in replacements:
+        result = re.sub(pattern, replacement, result)
+    return " ".join(result.split())
+
+
+def expand_query_variants(query: str) -> list[str]:
+    variants = [query]
+    lowered = query.casefold()
+    if "trái tuyến" in lowered or "ngoại tuyến" in lowered:
+        variants.append(re.sub(r"\b(?:trái|ngoại)\s+tuyến\b", "không đúng tuyến", query, flags=re.I))
+    if re.search(r"\b(?:người|trẻ)\s+dưới\s+(?:6|sáu)\s+tuổi\b", lowered):
+        variants.append(re.sub(r"\b(?:người|trẻ)\s+dưới\s+(?:6|sáu)\s+tuổi\b", "trẻ em dưới 6 tuổi", query, flags=re.I))
+    return list(dict.fromkeys(variants))
+
+
+def filter_relevant_evidence(query: str, hits: Sequence[RetrievalResult]) -> list[RetrievalResult]:
+    lowered_query = query.casefold()
+    is_trai_tuyen = "ngoại tuyến" in lowered_query or "trái tuyến" in lowered_query or "không đúng tuyến" in lowered_query
+    filtered: list[RetrievalResult] = []
+    for item in hits:
+        content = f"{item.title} {item.section_title} {item.content}".casefold()
+        if is_trai_tuyen:
+            if "vneid" in content or "khai sinh liên thông" in content:
+                continue
+            if "từ chối thanh toán" in content and "tự đi khám" not in content and "mức hưởng" not in content:
+                continue
+            if "không đúng tuyến" in content or "trái tuyến" in content or "tự đi khám" in content:
+                filtered.append(item)
+                continue
+        else:
+            filtered.append(item)
+    return filtered
+
+

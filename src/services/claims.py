@@ -70,3 +70,45 @@ def claim_dict(claim: LegalClaim) -> dict[str, object]:
         "verification": claim.verification,
         "reason": claim.reason,
     }
+
+
+import re
+from collections.abc import Sequence
+
+_FACT_NUMBER = re.compile(r"\d+(?:[./%-]\d+)*", re.IGNORECASE)
+_STATUS_POLARITIES = (
+    ("hết hiệu lực", "còn hiệu lực"),
+    ("không còn hiệu lực", "còn hiệu lực"),
+    ("bãi bỏ", "còn hiệu lực"),
+    ("thay thế", "còn hiệu lực"),
+)
+_STATUS_MARKERS = ("còn hiệu lực", "hết hiệu lực", "không còn hiệu lực", "bãi bỏ", "thay thế")
+
+
+def claim_facts_supported(claim: str, evidence: Sequence[str]) -> bool:
+    """Verify that concrete numbers or status claims are explicitly supported in evidence."""
+    claim_text = claim.casefold()
+    evidence_text = " ".join(evidence).casefold()
+
+    claim_numbers = set(_FACT_NUMBER.findall(claim_text))
+    claim_statuses = [marker for marker in _STATUS_MARKERS if marker in claim_text]
+
+    if not claim_numbers and not claim_statuses:
+        # No concrete numeric/status assertions in claim
+        return False
+
+    if claim_numbers and not claim_numbers.issubset(set(_FACT_NUMBER.findall(evidence_text))):
+        return False
+
+    for status in claim_statuses:
+        if status not in evidence_text:
+            return False
+
+    for positive, negative in _STATUS_POLARITIES:
+        if positive in claim_text and negative in evidence_text and positive not in evidence_text:
+            return False
+        if negative in claim_text and positive in evidence_text and negative not in evidence_text:
+            return False
+
+    return True
+

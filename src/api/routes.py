@@ -216,8 +216,15 @@ async def _stream_agent(
                 close_stream = getattr(event_stream, "aclose", None)
                 if close_stream is not None:
                     await close_stream()
-            if stream_span is not None:
-                stream_span.update(output={"verified": bool(final), "citation_count": len((final or {}).get("citations") or [])})
+            if stream_span is not None and final:
+                stream_span.update(
+                    output={
+                        "response": final.get("response", ""),
+                        "citation_count": len(final.get("citations") or []),
+                        "claim_count": len(final.get("claims") or []),
+                        "verified": bool(final),
+                    }
+                )
         if not final:
             raise RuntimeError("Agent stream ended without a verified final event")
         response = final.get("response")
@@ -244,6 +251,9 @@ async def _stream_agent(
         logger.exception("Agent stream failure")
         del exc
         yield _sse_event("error", {"code": "stream_unavailable", "message": "Chat stream unavailable"})
+    finally:
+        from src.integrations.langfuse import flush_langfuse
+        flush_langfuse()
 
 
 @router.post(

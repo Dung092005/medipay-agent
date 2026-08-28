@@ -48,7 +48,7 @@ async def test_chat_success(client):
 
     assert response.status_code == 200
     assert response.json()["response"] == "Đã xử lý"
-    assert response.json()["citations"][0]["chunk_id"] == "chunk-1"
+    assert response.json()["citations"][0]["title"] == "Luật BHYT"
 
 
 @pytest.mark.asyncio
@@ -72,7 +72,11 @@ async def test_chat_stream_emits_only_verified_final_event(client):
 
 
 @pytest.mark.asyncio
-async def test_chat_requires_authentication(client):
+async def test_chat_requires_authentication(client, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ALLOW_GUEST_ACCESS", "false")
+    from src.config import get_settings
+    get_settings.cache_clear()
     app.dependency_overrides.pop(get_current_user, None)
     try:
         response = await client.post("/api/v1/chat", json={"message": "Tôi cần hỗ trợ"})
@@ -80,6 +84,7 @@ async def test_chat_requires_authentication(client):
         from tests.conftest import _test_user
 
         app.dependency_overrides[get_current_user] = _test_user
+        get_settings.cache_clear()
 
     assert response.status_code == 401
 

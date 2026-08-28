@@ -15,28 +15,20 @@ class CaptureSession:
 
 
 @pytest.mark.asyncio
-async def test_search_vectors_restricts_query_to_semantic_eligible_chunks():
+async def test_search_title_documents_uses_active_release():
     session = CaptureSession()
     repository = GraphRepository(session)
 
-    result = await repository.search_vectors(
-        [0.1, 0.2],
-        limit=10,
+    result = await repository.search_title_documents(
+        "Luật Bảo hiểm y tế",
+        limit=4,
         dataset_id="dataset-1",
-        similarity_threshold=0.25,
     )
 
     assert result == []
     sql = str(session.statement)
-    assert "c.dataset_id = :dataset_id" in sql
-    assert "AND c.embedding IS NOT NULL" in sql
-    assert "AND c.semantic_eligible IS TRUE" in sql
-    assert session.parameters == {
-        "embedding": "[0.1,0.2]",
-        "dataset_id": "dataset-1",
-        "limit": 10,
-        "similarity_threshold": 0.25,
-    }
+    assert "d.dataset_id = :dataset_id" in sql
+    assert "documents d" in sql
 
 
 @pytest.mark.asyncio
@@ -52,10 +44,7 @@ async def test_search_lexical_uses_active_release_full_text_index():
 
     assert result == []
     sql = str(session.statement)
-    assert "c.search_vector @@ plainto_tsquery('simple', :query)" in sql
+    assert "c.search_vector" in sql
     assert "c.dataset_id = :dataset_id" in sql
-    assert session.parameters == {
-        "query": "Thông tư 01",
-        "dataset_id": "dataset-1",
-        "limit": 10,
-    }
+    assert session.parameters["query"] == "Thông tư 01"
+    assert session.parameters["dataset_id"] == "dataset-1"

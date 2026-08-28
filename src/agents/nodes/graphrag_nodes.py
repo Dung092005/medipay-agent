@@ -9,7 +9,7 @@ from src.agents.state import AgentState
 from src.config import get_settings
 from src.models.graph import Citation, Entity, Relation, RetrievalResult
 from src.services.chat import get_runtime
-from src.services.claims import build_legal_claim, claim_dict
+from src.services.claims import build_legal_claim, claim_dict, classify_claim
 from src.services.retrieval import (
     decompose_query,
     extract_query_phrases,
@@ -24,7 +24,7 @@ _REASONING_BLOCK = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 _INTERNAL_CONTEXT_FIELD = re.compile(
-    r"\b(?:EVIDENCE_ID|DOCUMENT_ID|DATASET|DOCUMENT|CHUNK|SOURCE_REF)\s*=\s*[^\s,;]+",
+    r"\b(?:EVIDENCE_ID|DOCUMENT_ID|DATASET_ID|CHUNK_ID|INPUT_SHA256|TEXT_SHA256|RANK_DETAILS|DATASET|DOCUMENT|CHUNK|SOURCE_REF|UNIT_ID)\s*=\s*[^\s,;]+",
     flags=re.IGNORECASE,
 )
 _CLAIM_TOKEN = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", flags=re.IGNORECASE)
@@ -45,6 +45,7 @@ _HIGH_RISK_MARKERS = (
     "bao nhiêu tiền", "thanh toán",
 )
 _OFFICIAL_STATUS_MARKERS = ("hiệu lực", "còn hiệu lực", "hết hiệu lực", "bãi bỏ", "thay thế")
+_STATUS_MARKERS = ("còn hiệu lực", "hết hiệu lực", "không còn hiệu lực", "bãi bỏ", "thay thế")
 
 
 async def intake_node(state: AgentState) -> dict:
@@ -164,6 +165,7 @@ def _pack_context(
             metadata += "\n"
         block = (
             f"NGUỒN THỨ {index}\n"
+            f"EVIDENCE_ID=E{index}\n"
             f"ƯU TIÊN NGỮ CẢNH: {index}\n"
             f"TÊN VĂN BẢN: {item.title}\n"
             f"SỐ/KÝ HIỆU CÔNG KHAI: {item.document_number}\n"
@@ -228,11 +230,14 @@ async def verify_evidence_node(state: AgentState) -> dict:
         citation.evidence_kind == "document_metadata" and citation.provenance_verified
         for citation in direct_citations
     )
-    if any(marker in query.casefold() for marker in _OFFICIAL_STATUS_MARKERS) and not official_status:
+    if not valid and not official_status:
         return {"verification_failed": True, "response": no_answer_response(query, reason="unverified")}
-    if valid or official_status:
-        return {"verification_failed": False}
-    return {"verification_failed": True, "response": no_answer_response(query, reason="unverified")}
+    return {"verification_failed": False}
+
+
+def compose_source_answer(*args, **kwargs):
+    from src.services.retrieval import compose_source_answer as _fn
+    return _fn(*args, **kwargs)
 
 
 async def generate_node(state: AgentState) -> dict:
@@ -242,6 +247,8 @@ async def generate_node(state: AgentState) -> dict:
     if not evidence:
         return {"response": no_answer_response(state.get("query", ""))}
     response = await get_runtime().generate(state.get("query", ""), state.get("context", ""))
+    if response.strip().startswith("Hiện tại hệ thống không tìm thấy thông tin hoặc văn bản pháp lý phù hợp"):
+        return {"response": NO_EVIDENCE_RESPONSE}
     return {"response": response}
 
 
@@ -469,13 +476,19 @@ def _sanitize_output(value: str, evidence: Sequence[RetrievalResult] = ()) -> st
         public_label = item.document_number or item.title or "nguồn pháp lý"
         if len(item.document_id) >= 5:
             replacements[item.document_id] = public_label
-        if len(item.chunk_id) >= 5:
+        if len(item.chunk_id) >= 5 and item.chunk_id != item.document_number:
             replacements[item.chunk_id] = "nguồn pháp lý"
         if len(item.dataset_id) >= 5:
             replacements[item.dataset_id] = ""
+        if len(item.unit_id) >= 5:
+            replacements[item.unit_id] = ""
+        if len(item.input_sha256) >= 5:
+            replacements[item.input_sha256] = ""
+        if len(item.text_sha256) >= 5:
+            replacements[item.text_sha256] = ""
     for private_id in sorted(replacements, key=len, reverse=True):
         sanitized = re.sub(
-            rf"(?<![\w./-]){re.escape(private_id)}(?![\w./-])",
+            rf"(?<![A-Za-z0-9_]){re.escape(private_id)}(?![A-Za-z0-9_])",
             replacements[private_id],
             sanitized,
         )
@@ -518,8 +531,6 @@ def _citations_from_evidence(
                 source_checked_at=item.source_checked_at,
             )
         )
-        if len(citations) >= get_settings().max_citations:
-            break
     return citations
 
 
@@ -532,23 +543,8 @@ def _claim_tokens(value: str) -> set[str]:
 
 
 def _claim_facts_supported(claim: str, evidence: Sequence[str]) -> bool:
-    """Reject concrete numeric/status contradictions in a cited claim.
-
-    Token overlap can accept a sentence with a changed date, percentage, or
-    legal-status polarity. This bounded deterministic check is conservative;
-    it strengthens the lexical audit without pretending to be open-ended
-    semantic proof.
-    """
-    claim_text = claim.casefold()
-    evidence_text = " ".join(evidence).casefold()
-    if not set(_FACT_NUMBER.findall(claim_text)).issubset(set(_FACT_NUMBER.findall(evidence_text))):
-        return False
-    for positive, negative in _STATUS_POLARITIES:
-        if positive in claim_text and negative in evidence_text and positive not in evidence_text:
-            return False
-        if negative in claim_text and positive in evidence_text and negative not in evidence_text:
-            return False
-    return True
+    from src.services.claims import claim_facts_supported as _fn
+    return _fn(claim, evidence)
 
 
 def _audit_claims(response: str, citations: Sequence[Citation], query: str = "") -> list[dict]:
@@ -575,8 +571,12 @@ def _audit_claims(response: str, citations: Sequence[Citation], query: str = "")
         tokens = _claim_tokens(sentence)
         best_id = ""
         best_overlap = 0
+        has_concrete_facts = bool(
+            _FACT_NUMBER.findall(sentence)
+            or any(marker in sentence.casefold() for marker in _STATUS_MARKERS)
+        )
         for citation_id, evidence_tokens in source_tokens.items():
-            if not _claim_facts_supported(sentence, [source_text[citation_id]]):
+            if has_concrete_facts and not _claim_facts_supported(sentence, [source_text[citation_id]]):
                 continue
             overlap = len(tokens & evidence_tokens)
             if overlap > best_overlap:
@@ -596,7 +596,7 @@ def _audit_claims(response: str, citations: Sequence[Citation], query: str = "")
             verification, reason = "unsupported", "claim has no verifiable content"
         elif not risk_supported:
             verification, reason = "unsupported", "high-risk marker is absent from cited evidence"
-        elif not best_id or not _claim_facts_supported(sentence, [source_text[best_id]]):
+        elif not best_id or (has_concrete_facts and not _claim_facts_supported(sentence, [source_text[best_id]])):
             verification, reason = "unsupported", "facts are not supported by one cited source"
         elif best_overlap >= 2:
             verification, reason = "entailed", "lexical overlap with cited evidence"
@@ -613,7 +613,7 @@ def _audit_claims(response: str, citations: Sequence[Citation], query: str = "")
                 build_legal_claim(
                     claim_id=f"claim-{index}",
                     text=sentence,
-                    citation=best_citation,
+                    citation=best_citation if verification != "unsupported" else None,
                     verification=verification,
                     reason=reason,
                 )
@@ -670,44 +670,33 @@ async def guardrail_node(state: AgentState) -> dict:
     deterministic_response = response.startswith("-") or response.startswith("Các điều/khoản")
     citations = (
         _citations_from_evidence(evidence, preserve_order=deterministic_response)
-        if deterministic_response
-        else state.get("direct_citations") or _citations_from_evidence(evidence)
+        if (evidence or deterministic_response)
+        else state.get("direct_citations") or []
     )
     claims = _audit_claims(response, citations, state.get("query", ""))
-    # An abstention is a statement about the absence of sufficient support.
-    if response == NO_EVIDENCE_RESPONSE:
-        citations = []
-        claims = []
+
     supported_ids = {
         evidence_id
         for claim in claims
         if claim.get("verification") in ("entailed", "partial")
         for evidence_id in claim.get("evidence_ids", [])
     }
-    if response != NO_EVIDENCE_RESPONSE:
+
+    if supported_ids:
         from src.config import get_settings
-        ordered_citations: list[Citation] = []
-        seen_chunks: set[str] = set()
-        seen_docs: set[str] = set()
+        citations = [citation for citation in citations if citation.chunk_id in supported_ids][: get_settings().max_citations]
+    elif (
+        response == NO_EVIDENCE_RESPONSE
+        or requires_evidence_verification(state.get("query", ""))
+        or state.get("direct_citations")
+    ):
+        response = NO_EVIDENCE_RESPONSE
+        citations = []
+        claims = []
+    else:
+        from src.config import get_settings
+        citations = citations[: get_settings().max_citations]
 
-        # 1. Add directly supported citations
-        for citation in citations:
-            if citation.chunk_id in supported_ids:
-                seen_chunks.add(citation.chunk_id)
-                if citation.document_number:
-                    seen_docs.add(citation.document_number)
-                ordered_citations.append(citation)
-
-        # 2. Backfill with relevant legal evidence citations up to max_citations
-        for citation in _citations_from_evidence(evidence):
-            if citation.chunk_id not in seen_chunks and (not citation.document_number or citation.document_number not in seen_docs):
-                seen_chunks.add(citation.chunk_id)
-                if citation.document_number:
-                    seen_docs.add(citation.document_number)
-                ordered_citations.append(citation)
-            if len(ordered_citations) >= get_settings().max_citations:
-                break
-        citations = ordered_citations
     return {
         "response": response,
         "citations": [citation.model_dump() for citation in citations],

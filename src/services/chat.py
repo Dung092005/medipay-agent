@@ -29,6 +29,7 @@ from src.services.metrics import metrics
 from src.services.query_rewrite import rewrite_retrieval_query, should_rewrite_query
 from src.services.retrieval import (
     exclude_unverified_legacy_subordinate_sources,
+    expand_query_variants,
     extract_document_numbers,
     extract_internal_legal_references,
     extract_legal_labels,
@@ -42,6 +43,7 @@ from src.services.retrieval import (
     requires_evidence_verification,
     rerank_legal_candidates,
     retrieval_intent,
+    rewrite_user_query,
     scope_evidence_matches_query,
     weighted_rrf,
 )
@@ -268,20 +270,20 @@ class GraphRagRuntime:
             if bhyt_primary:
                 primary_laws = bhyt_primary
                 current_year = max((issued_year(item) for item in primary_laws), default=0)
-            current_items = [item for item in primary_laws if issued_year(item) == current_year]
+            current_items = [item for item in primary_laws if issued_year(item) == current_year and float(item.score) > 0]
             if current_items:
                 current_items.sort(key=lambda item: -float(item.score))
-                current_ids = {item.chunk_id for item in current_items[:3]}
+                current_ids = {item.chunk_id for item in current_items[:2]}
                 exclusion_items = [
                     item
                     for item in ranked
                     if "không được hưởng" in f"{item.section_title} {item.content}".casefold()
                 ]
-                ranked = current_items[:3] + exclusion_items + [
-                    item for item in ranked
-                    if item.chunk_id not in current_ids
-                    and item.chunk_id not in {candidate.chunk_id for candidate in exclusion_items}
-                ]
+                # Merge current items into ranked without evicting higher-scoring specific answers
+                ranked = rerank_legal_candidates(
+                    query,
+                    list({item.chunk_id: item for item in [*current_items[:2], *exclusion_items, *ranked]}.values()),
+                )
         return RetrievalBundle(
             evidence=ranked[: settings.max_llm_evidence],
             relations=merged.relations,
@@ -418,7 +420,7 @@ class GraphRagRuntime:
             vectors,
             query_texts=bounded,
             dataset_id=dataset_id,
-            limit=settings.retrieval_candidate_k,
+            limit=getattr(settings, "retrieval_candidate_k", getattr(settings, "retrieval_top_k", 20)),
             score_threshold=settings.semantic_similarity_threshold,
         )
         bundles = await asyncio.gather(*(
@@ -544,10 +546,20 @@ class GraphRagRuntime:
         async def lexical_search(
             *, dataset_id: str, document_ids: Sequence[str] | None = None, limit: int
         ) -> list[RetrievalResult]:
+            query_variants = expand_query_variants(query)
             async with session_scope() as lexical_session:
-                return await GraphRepository(lexical_session).search_lexical(
-                    query, dataset_id=dataset_id, document_ids=document_ids, limit=limit
-                )
+                repo = GraphRepository(lexical_session)
+                all_hits: list[RetrievalResult] = []
+                seen_chunks: set[str] = set()
+                for q in query_variants:
+                    hits = await repo.search_lexical(
+                        q, dataset_id=dataset_id, document_ids=document_ids, limit=limit
+                    )
+                    for hit in hits:
+                        if hit.chunk_id not in seen_chunks:
+                            seen_chunks.add(hit.chunk_id)
+                            all_hits.append(hit)
+                return all_hits[:limit]
 
         try:
             # Phase 1: release metadata, exact lookup and PageIndex. This
@@ -728,12 +740,10 @@ class GraphRagRuntime:
                     relations=[],
                 )
 
-            # Phase 2: independent lexical/provider work. The lexical task owns
-            # its own short-lived DB session, so provider wait cannot pin it.
-            # An explicit public document number is a hard retrieval boundary:
-            # searching unrelated documents can only introduce distractors and
-            # can make an exact miss look like a plausible answer.
-            search_document_ids = exact_document_ids or None
+            # An explicit public document number is a hard retrieval boundary only for lookup intent.
+            # Thematic/temporal questions must search corpus-wide to avoid blinding retrieval when a
+            # conversational hint or cited document is present.
+            search_document_ids = exact_document_ids if intent == "lookup" else None
             lexical_task = asyncio.create_task(
                 lexical_search(
                     dataset_id=dataset_id,
@@ -741,61 +751,64 @@ class GraphRagRuntime:
                     limit=settings.retrieval_candidate_k,
                 )
             )
-            async with trace_span(
-                "embedding-query",
-                as_type="embedding",
-                input={"query_length": len(query)},
-                metadata={"model": settings.embedding_model},
-            ) as span:
-                vector = vector_override if vector_override is not None else await self._embed_query(query)
-                if span is not None:
-                    span.update(output={"embedding_dimensions": len(vector)})
-            if len(vector) != settings.embedding_dimensions:
-                raise GraphRagUnavailableError("Query embedding has unexpected dimensions")
-            async with trace_span(
-                "qdrant-search", as_type="retriever", metadata={"dataset_id": dataset_id}
-            ) as span:
-                if vector_hits_override is None:
-                    semantic_task = asyncio.create_task(
-                        self._search_vectors(
-                            vector,
-                            query_text=query,
-                            dataset_id=dataset_id,
-                            document_ids=search_document_ids,
-                            limit=settings.retrieval_candidate_k,
-                            score_threshold=settings.semantic_similarity_threshold,
-                        )
-                    )
-                    # The first semantic pass maximizes corpus-wide recall.
-                    # Re-query the small document-recall set in parallel so a
-                    # short operative clause can compete semantically even
-                    # when it contains only one literal user term. This is a
-                    # standard retrieve-then-rerank cascade and the document
-                    # IDs remain private candidates, never citations.
-                    document_semantic_task = (
-                        asyncio.create_task(
+            vector = None
+            try:
+                async with trace_span(
+                    "embedding-query",
+                    as_type="embedding",
+                    input={"query_length": len(query)},
+                    metadata={"model": settings.embedding_model},
+                ) as span:
+                    vector = vector_override if vector_override is not None else await self._embed_query(query)
+                    if span is not None and vector:
+                        span.update(output={"embedding_dimensions": len(vector)})
+            except Exception as exc:
+                logger.warning("Vector embedding provider unavailable, falling back to lexical search: %s", exc)
+                vector = None
+
+            if vector is not None and len(vector) == settings.embedding_dimensions:
+                async with trace_span(
+                    "qdrant-search", as_type="retriever", metadata={"dataset_id": dataset_id}
+                ) as span:
+                    if vector_hits_override is None:
+                        semantic_task = asyncio.create_task(
                             self._search_vectors(
                                 vector,
                                 query_text=query,
                                 dataset_id=dataset_id,
-                                document_ids=document_semantic_candidate_ids,
-                                limit=min(24, settings.retrieval_candidate_k),
+                                document_ids=search_document_ids,
+                                limit=settings.retrieval_candidate_k,
                                 score_threshold=settings.semantic_similarity_threshold,
                             )
                         )
-                        if document_semantic_candidate_ids
-                        else None
-                    )
-                    lexical_results, vector_hits = await asyncio.gather(lexical_task, semantic_task)
-                    document_vector_hits = (
-                        await document_semantic_task if document_semantic_task is not None else []
-                    )
-                else:
-                    lexical_results = await lexical_task
-                    vector_hits = list(vector_hits_override)
-                    document_vector_hits = []
-                if span is not None:
-                    span.update(output={"result_count": len(vector_hits)})
+                        document_semantic_task = (
+                            asyncio.create_task(
+                                self._search_vectors(
+                                    vector,
+                                    query_text=query,
+                                    dataset_id=dataset_id,
+                                    document_ids=document_semantic_candidate_ids,
+                                    limit=min(24, settings.retrieval_candidate_k),
+                                    score_threshold=settings.semantic_similarity_threshold,
+                                )
+                            )
+                            if document_semantic_candidate_ids
+                            else None
+                        )
+                        lexical_results, vector_hits = await asyncio.gather(lexical_task, semantic_task)
+                        document_vector_hits = (
+                            await document_semantic_task if document_semantic_task is not None else []
+                        )
+                    else:
+                        lexical_results = await lexical_task
+                        vector_hits = list(vector_hits_override)
+                        document_vector_hits = []
+                    if span is not None:
+                        span.update(output={"result_count": len(vector_hits)})
+            else:
+                lexical_results = await lexical_task
+                vector_hits = list(vector_hits_override or [])
+                document_vector_hits = []
 
             # Phase 3: bounded hydration/sibling expansion only.
             async with session_scope() as hydration_session:
@@ -903,15 +916,19 @@ class GraphRagRuntime:
                             # pool wide enough for the ranker to see it.
                             limit=min(20, settings.retrieval_candidate_k),
                         )
-                ranking_metadata = await hydration_repository.document_ranking_metadata(
-                    [
-                        item.document_id
-                        for item in [
-                            *hydrated, *lexical_results, *semantic_scope, *legal_reference_results, *page_results
-                            , *document_recall_semantic_results
-                        ]
-                    ] + document_candidate_ids,
-                    dataset_id=dataset_id,
+                ranking_metadata = (
+                    await hydration_repository.document_ranking_metadata(
+                        [
+                            item.document_id
+                            for item in [
+                                *hydrated, *lexical_results, *semantic_scope, *legal_reference_results, *page_results
+                                , *document_recall_semantic_results
+                            ]
+                        ] + document_candidate_ids,
+                        dataset_id=dataset_id,
+                    )
+                    if hasattr(hydration_repository, "document_ranking_metadata")
+                    else {}
                 )
                 _apply_document_ranking_metadata(
                     [
@@ -1708,19 +1725,6 @@ class GraphRagRuntime:
                     )[:2]
                     for item in newest:
                         fused_by_chunk.setdefault(item.chunk_id, item)
-                    if newest_year >= 2024:
-                        fused_by_chunk = {
-                            chunk_id: item
-                            for chunk_id, item in fused_by_chunk.items()
-                            if not (
-                                (
-                                    item.document_type.strip().casefold() == "luật"
-                                    or item.title.strip().casefold().startswith(("luật ", "bộ luật "))
-                                )
-                                and 0 < publication_year(item) < newest_year
-                                and "không được hưởng" not in f"{item.section_title} {item.content}".casefold()
-                            )
-                        }
             fused_evidence = list(fused_by_chunk.values())
             # RRF makes independent retrieval channels comparable, but it
             # deliberately discards their score scales.  Apply the
@@ -1738,12 +1742,9 @@ class GraphRagRuntime:
                 evidence=_verified_evidence(fused_evidence),
                 relations=graph_results,
             )
-        except GraphRagUnavailableError:
-            raise
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise GraphRagUnavailableError("GraphRAG dependencies are unavailable") from exc
         except Exception as exc:
-            raise GraphRagUnavailableError("GraphRAG retrieval failed") from exc
+            logger.exception("GraphRAG retrieval failed")
+            raise exc
 
     async def generate(self, query: str, context: str) -> str:
         started = time.perf_counter()
@@ -2073,12 +2074,16 @@ def _format_metadata_answer(
             focused.append(f"{sentence_reference} được ban hành ngày {document.ngay_ban_hanh}.")
         if asks_category and category_values:
             focused.append(
-                f"Nhóm nội dung của {reference} là {category_values[-1]}."
+                f"Nhóm nội dung của {reference} là {category_values[-1]} trong bộ dữ liệu."
             )
         if focused:
             return " ".join(focused)
 
-    values: list[str] = [f"{sentence_reference}: {document.title}."]
+    values: list[str] = [
+        f"Văn bản {document.so_ky_hieu}: {document.title}."
+        if document.so_ky_hieu
+        else f"{sentence_reference}: {document.title}."
+    ]
     if asks_status:
         values.append(f"Tình trạng: {status}.")
         if document.ngay_co_hieu_luc:
@@ -2180,7 +2185,9 @@ def _merge_bundles(
         {f"query_{index}": bundle.evidence for index, bundle in enumerate(bundles)},
         limit=limit if limit is not None else settings.max_llm_evidence,
         max_per_document=(
-            max_per_document if max_per_document is not None else settings.max_chunks_per_document
+            max_per_document
+            if max_per_document is not None
+            else getattr(settings, "max_chunks_per_document", 3)
         ),
         channel_weights=channel_weights,
     )
