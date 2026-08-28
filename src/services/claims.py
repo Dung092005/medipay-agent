@@ -85,20 +85,30 @@ _STATUS_POLARITIES = (
 _STATUS_MARKERS = ("còn hiệu lực", "hết hiệu lực", "không còn hiệu lực", "bãi bỏ", "thay thế")
 
 
+def _normalize_num_token(token: str) -> str:
+    cleaned = token.strip().replace(".", "").replace(",", "").replace("%", "").lstrip("0")
+    return cleaned or "0"
+
+
 def claim_facts_supported(claim: str, evidence: Sequence[str]) -> bool:
     """Verify that concrete numbers or status claims are explicitly supported in evidence."""
     claim_text = claim.casefold()
     evidence_text = " ".join(evidence).casefold()
 
-    claim_numbers = set(_FACT_NUMBER.findall(claim_text))
+    raw_claim_numbers = set(_FACT_NUMBER.findall(claim_text))
     claim_statuses = [marker for marker in _STATUS_MARKERS if marker in claim_text]
 
-    if not claim_numbers and not claim_statuses:
+    if not raw_claim_numbers and not claim_statuses:
         # No concrete numeric/status assertions in claim
         return False
 
-    if claim_numbers and not claim_numbers.issubset(set(_FACT_NUMBER.findall(evidence_text))):
-        return False
+    raw_evidence_numbers = set(_FACT_NUMBER.findall(evidence_text))
+    norm_claim_numbers = {_normalize_num_token(n) for n in raw_claim_numbers}
+    norm_evidence_numbers = {_normalize_num_token(n) for n in raw_evidence_numbers}
+
+    if raw_claim_numbers and not norm_claim_numbers.issubset(norm_evidence_numbers):
+        if not all(n in evidence_text or _normalize_num_token(n) in norm_evidence_numbers for n in raw_claim_numbers):
+            return False
 
     for status in claim_statuses:
         if status not in evidence_text:
