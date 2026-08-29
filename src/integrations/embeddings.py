@@ -24,14 +24,9 @@ class OpenAIEmbeddingModel:
             "HTTP-Referer": "https://medipay-ai.vercel.app",
             "X-Title": "MediPay BHYT Agent",
         }
-        http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
-        )
         kwargs: dict = {
-            "api_key": api_key,
+            "api_key": api_key.replace(" ", "").replace("\n", "").replace("\r", ""),
             "default_headers": default_headers,
-            "http_client": http_client,
             "max_retries": 3,
         }
         if base_url:

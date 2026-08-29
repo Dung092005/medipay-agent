@@ -84,7 +84,7 @@ class ChatVertexGemini(BaseChatModel):
         fallback_model = "gpt-5" if settings.openai_base_url and "yescale" in settings.openai_base_url else "openai/gpt-4o-mini"
         kwargs: dict = {
             "model": fallback_model,
-            "api_key": settings.openai_api_key,
+            "api_key": settings.openai_api_key.replace(" ", "").replace("\n", "").replace("\r", ""),
             "temperature": self.temperature,
             "timeout": self.timeout,
             "max_retries": 2,
@@ -226,7 +226,7 @@ def get_llm() -> BaseChatModel:
     }
     kwargs: dict = {
         "model": settings.model_name,
-        "api_key": settings.openai_api_key,
+        "api_key": settings.openai_api_key.replace(" ", "").replace("\n", "").replace("\r", ""),
         "temperature": settings.llm_temperature,
         "timeout": settings.llm_timeout_seconds,
         "max_tokens": settings.llm_max_output_tokens,
@@ -267,7 +267,7 @@ def get_rewrite_llm() -> BaseChatModel:
     }
     kwargs: dict = {
         "model": settings.model_name,
-        "api_key": settings.openai_api_key,
+        "api_key": settings.openai_api_key.replace(" ", "").replace("\n", "").replace("\r", ""),
         "temperature": 0.0,
         "timeout": min(settings.llm_timeout_seconds, settings.query_rewrite_timeout_seconds),
         "max_tokens": settings.query_rewrite_max_tokens,
