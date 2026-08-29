@@ -78,7 +78,8 @@ class ChatVertexGemini(BaseChatModel):
         if not settings.openai_api_key:
             return None
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "HTTP-Referer": "https://medipay-ai.vercel.app",
+            "X-Title": "MediPay BHYT Agent",
         }
         fallback_model = "gpt-5" if settings.openai_base_url and "yescale" in settings.openai_base_url else "openai/gpt-4o-mini"
         kwargs: dict = {
@@ -220,7 +221,8 @@ def get_llm() -> BaseChatModel:
         raise LlmConfigurationError("Chat provider is not configured")
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "HTTP-Referer": "https://medipay-ai.vercel.app",
+        "X-Title": "MediPay BHYT Agent",
     }
     kwargs: dict = {
         "model": settings.model_name,
@@ -260,7 +262,8 @@ def get_rewrite_llm() -> BaseChatModel:
         raise LlmConfigurationError("Query rewrite provider is not configured")
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "HTTP-Referer": "https://medipay-ai.vercel.app",
+        "X-Title": "MediPay BHYT Agent",
     }
     kwargs: dict = {
         "model": settings.model_name,
