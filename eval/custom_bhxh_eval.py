@@ -260,9 +260,21 @@ def finalize_bhxh_evaluation(
         for cat in score["failure_categories"]:
             failure_counts[cat] = failure_counts.get(cat, 0) + 1
 
+    category_stats: dict[str, dict[str, int]] = {}
+    for score in scores:
+        cat = str(score.get("category") or "unknown")
+        bucket = category_stats.setdefault(cat, {"total": 0, "passed": 0, "failed": 0, "not_observable": 0})
+        bucket["total"] += 1
+        if score["status"] == "PROVISIONAL_PASS":
+            bucket["passed"] += 1
+        elif score["status"] == "NOT_OBSERVABLE":
+            bucket["not_observable"] += 1
+        else:
+            bucket["failed"] += 1
+
     summary = {
         "status": "PROVISIONAL_PASS" if all(s["status"] == "PROVISIONAL_PASS" for s in scores) else "PROVISIONAL_FAIL",
-        "dataset_name": "golden_bhxh_hoidap_v1",
+        "dataset_name": dataset_path.stem,
         "reference_status": "official_answer_unreviewed",
         "threshold": threshold,
         "total": len(scores),
@@ -274,6 +286,7 @@ def finalize_bhxh_evaluation(
         "fallback_answers": sum("FALLBACK_ANSWER" in s["failure_categories"] for s in scores),
         "metric_means": metric_means,
         "failure_categories": dict(sorted(failure_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "by_category": category_stats,
     }
 
     (output_dir / "summary.json").write_text(_canonical_json(summary) + "\n", encoding="utf-8")
@@ -281,9 +294,9 @@ def finalize_bhxh_evaluation(
     # Failures report
     failures = [score for score in scores if score["status"] != "PROVISIONAL_PASS"]
     failure_lines = [
-        "# BHXH 30 Golden Candidates Evaluation Failures",
+        f"# {dataset_path.stem} — Evaluation Failures",
         "",
-        "> Đánh giá trên candidate gold 30 câu hỏi thực tế BHXH. Ngưỡng đạt chuẩn threshold = " + str(threshold),
+        f"> Đánh giá RAGAS trên golden dataset `{dataset_path.name}`. Ngưỡng đạt chuẩn threshold = {threshold}",
         "",
         f"- **Tổng số câu**: {summary['total']}",
         f"- **Provisional PASS**: {summary['provisional_passed']}",
@@ -312,16 +325,19 @@ def finalize_bhxh_evaluation(
     (output_dir / "failures.md").write_text("\n".join(failure_lines) + "\n", encoding="utf-8")
 
     # Full report
+    pass_rate = round(summary["provisional_passed"] / summary["total"] * 100, 1) if summary["total"] else 0.0
     report_lines = [
-        "# MediPay GraphRAG — Báo Cáo Đánh Giá 30 Câu Golden BHXH",
+        f"# MediPay GraphRAG — Báo Cáo RAGAS ({dataset_path.stem})",
         "",
         f"- **Thời gian chạy**: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"- **Dataset**: `{dataset_path.name}`",
         f"- **Trạng thái tổng thể**: **{summary['status']}**",
         f"- **Tổng số câu hỏi**: **{summary['total']}**",
-        f"- **Thực thi thành công (Runtime Completed)**: **{summary['runtime_completed']}/{summary['total']}**",
-        f"- **Số câu đạt chuẩn (Pass Rate)**: **{summary['provisional_passed']}/{summary['total']} ({round(summary['provisional_passed'] / summary['total'] * 100, 1)}%)**",
+        f"- **Runtime hoàn thành**: **{summary['runtime_completed']}/{summary['total']}**",
+        f"- **Pass rate**: **{summary['provisional_passed']}/{summary['total']} ({pass_rate}%)**",
+        f"- **Fail**: **{summary['provisional_failed']}** | **Not observable**: **{summary['not_observable']}**",
         "",
-        "## 1. Điểm số RAGAS trung bình (Metric Means)",
+        "## 1. Điểm RAGAS trung bình",
         "",
         "| Metric | Điểm trung bình | Ngưỡng yêu cầu | Đánh giá |",
         "|---|---:|---:|:---:|",
@@ -340,7 +356,21 @@ def finalize_bhxh_evaluation(
     report_lines.extend(
         [
             "",
-            "## 2. Phân bố các nhóm lỗi (Failure Distribution)",
+            "## 2. Pass rate theo chủ đề",
+            "",
+            "| Chủ đề | Tổng | Pass | Fail | Not observable |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for cat, bucket in sorted(summary["by_category"].items()):
+        report_lines.append(
+            f"| `{cat}` | {bucket['total']} | {bucket['passed']} | {bucket['failed']} | {bucket['not_observable']} |"
+        )
+
+    report_lines.extend(
+        [
+            "",
+            "## 3. Top lỗi",
             "",
             "| Nhóm lỗi | Số lượng |",
             "|---|---:|",
@@ -352,14 +382,38 @@ def finalize_bhxh_evaluation(
     report_lines.extend(
         [
             "",
-            "## 3. Các tệp dữ liệu chi tiết",
+            "## 4. Bảng điểm từng câu",
             "",
-            "- `bhxh_dataset.jsonl`: Danh sách 30 câu hỏi và reference câu trả lời.",
-            "- `actual_answers.jsonl`: Câu trả lời thực tế, contexts và citations sinh ra từ pipeline.",
-            "- `ragas_scores.jsonl`: Chi tiết điểm số Ragas của từng câu.",
-            "- `case_scores.jsonl`: Tổng hợp toàn bộ metric cho từng câu.",
-            "- `failures.md`: Phân tích chi tiết từng câu hỏi bị điểm thấp.",
-            "- `summary.json`: Dữ liệu số liệu dạng JSON.",
+            "| Case | Chủ đề | Status | Ragas mean | Factual | Faithfulness | Relevancy |",
+            "|---|---|---|---:|---:|---:|---:|",
+        ]
+    )
+    for score in sorted(scores, key=lambda item: (item["status"] != "PROVISIONAL_PASS", -(item["metrics"].get("ragas_mean") or 0))):
+        metrics = score["metrics"]
+        ragas_mean = metrics.get("ragas_mean")
+        report_lines.append(
+            "| `{case_id}` | `{category}` | {status} | {ragas_mean} | {factual} | {faithfulness} | {relevancy} |".format(
+                case_id=score["case_id"],
+                category=score["category"],
+                status=score["status"],
+                ragas_mean=f"{ragas_mean:.3f}" if ragas_mean is not None else "N/A",
+                factual=f"{metrics.get('factual_correctness'):.3f}" if metrics.get("factual_correctness") is not None else "N/A",
+                faithfulness=f"{metrics.get('faithfulness'):.3f}" if metrics.get("faithfulness") is not None else "N/A",
+                relevancy=f"{metrics.get('response_relevancy'):.3f}" if metrics.get("response_relevancy") is not None else "N/A",
+            )
+        )
+
+    report_lines.extend(
+        [
+            "",
+            "## 5. File kết quả",
+            "",
+            "- `dataset.jsonl` — golden questions + reference answers",
+            "- `actual_answers.jsonl` — câu trả lời thật + retrieved context",
+            "- `ragas_scores.jsonl` — 5 metric RAGAS từng case",
+            "- `case_scores.jsonl` — tổng hợp pass/fail từng case",
+            "- `failures.md` — chi tiết các case không đạt",
+            "- `summary.json` — số liệu tổng hợp",
         ]
     )
     (output_dir / "report.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
@@ -368,13 +422,13 @@ def finalize_bhxh_evaluation(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Evaluation on 30 Golden BHXH QA cases")
+    parser = argparse.ArgumentParser(description="Run RAGAS evaluation on golden hoidap QA cases")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # run command (full end-to-end)
     run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--candidates", type=Path, default=PROJECT_ROOT / "data" / "eval" / "golden_bhxh_hoidap_v1.json")
-    run_parser.add_argument("--out", type=Path, default=PROJECT_ROOT / "eval" / "results" / "bhxh-30-current")
+    run_parser.add_argument("--candidates", type=Path, default=PROJECT_ROOT / "data" / "eval" / "golden_hoidap_v50.json")
+    run_parser.add_argument("--out", type=Path, default=PROJECT_ROOT / "eval" / "results" / "hoidap-v50-ragas")
     run_parser.add_argument("--ragas-python", type=Path, default=PROJECT_ROOT / ".eval-ragas-venv" / "Scripts" / "python.exe")
     run_parser.add_argument("--evaluator-model", default="gpt-4o-mini")
     run_parser.add_argument("--embedding-model", default="text-embedding-3-small")
@@ -408,7 +462,7 @@ def main() -> None:
     if args.command == "run":
         load_eval_environment()
         args.out.mkdir(parents=True, exist_ok=True)
-        dataset_path = args.out / "bhxh_dataset.jsonl"
+        dataset_path = args.out / "dataset.jsonl"
         actual_path = args.out / "actual_answers.jsonl"
         ragas_path = args.out / "ragas_scores.jsonl"
 
@@ -417,8 +471,8 @@ def main() -> None:
         print(f"      Đã nạp {build_info['count']} cases vào {dataset_path}", flush=True)
 
         if not args.skip_inference or not actual_path.is_file():
-            print("[2/4] Chạy Live Agent Inference trên 30 câu hỏi (read-only)...", flush=True)
-            run_id = f"bhxh-30-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
+            print(f"[2/4] Chạy Live Agent Inference trên {build_info['count']} câu hỏi (read-only)...", flush=True)
+            run_id = f"hoidap-v50-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
             generate_actual_answers(dataset_path, actual_path, run_id)
             print(f"      Hoàn thành inference. Kết quả lưu tại {actual_path}", flush=True)
         else:
@@ -453,7 +507,7 @@ def main() -> None:
         )
 
         manifest = {
-            "run_id": f"bhxh-30-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}",
+            "run_id": f"hoidap-v50-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}",
             "status": "COMPLETED",
             "candidate_source": str(args.candidates),
             "threshold": args.threshold,

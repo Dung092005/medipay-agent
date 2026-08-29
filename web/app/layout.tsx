@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { AuthProvider } from "../lib/auth-context";
+import { OAuthCallbackBridge } from "../components/oauth-callback-bridge";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -11,7 +12,9 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="vi">
       <body>
-        <AuthProvider>{children}</AuthProvider>
+        <OAuthCallbackBridge>
+          <AuthProvider>{children}</AuthProvider>
+        </OAuthCallbackBridge>
       </body>
     </html>
   );

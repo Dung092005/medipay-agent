@@ -205,7 +205,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // Direct Google OAuth 2.0 Popup Flow
+    // Direct Google OAuth 2.0 Popup Flow.
+    // The popup redirects back to our origin with tokens in the URL hash;
+    // OAuthCallbackBridge (mounted in the root layout) forwards that hash to us
+    // via postMessage and closes the popup. We only need to listen for it here,
+    // instead of polling popup.location (which is fragile and blocked by COOP).
     return new Promise<void>((resolve, reject) => {
       const redirectUri = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
       const oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
@@ -233,70 +237,84 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Check popup url interval for hash containing tokens
-      const interval = setInterval(async () => {
+      let settled = false;
+
+      const cleanup = () => {
+        window.removeEventListener("message", onMessage);
+        clearInterval(closeWatcher);
+      };
+
+      const completeSignIn = async (hash: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         try {
-          if (!popup || popup.closed) {
-            clearInterval(interval);
-            resolve();
-            return;
-          }
+          popup.close();
+        } catch {}
 
-          if (popup.location.href.includes(redirectUri)) {
-            const hash = popup.location.hash;
-            if (hash) {
-              const params = new URLSearchParams(hash.replace(/^#/, ""));
-              const idToken = params.get("id_token") || "";
-              const accessToken = params.get("access_token") || "";
+        const params = new URLSearchParams(hash.replace(/^#/, ""));
+        const idToken = params.get("id_token") || "";
+        const accessToken = params.get("access_token") || "";
 
-              popup.close();
-              clearInterval(interval);
-
-              // Fetch Google User Profile using accessToken or decode idToken
-              let profile: any = {};
-              if (accessToken) {
-                try {
-                  const userRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-                    headers: { Authorization: `Bearer ${accessToken}` },
-                  });
-                  if (userRes.ok) {
-                    profile = await userRes.json();
-                  }
-                } catch {
-                  // ignore
-                }
-              }
-
-              if (!profile.email && idToken) {
-                try {
-                  const payloadBase64 = idToken.split(".")[1];
-                  profile = JSON.parse(atob(payloadBase64));
-                } catch {
-                  // ignore
-                }
-              }
-
-              const authUser: AuthUser = {
-                uid: profile.sub || profile.id || `google-${Date.now()}`,
-                email: profile.email || "user@google.com",
-                displayName: profile.name || profile.given_name || "Người dùng Google",
-                photoURL: profile.picture || null,
-                role: "user",
-                idToken: idToken || accessToken,
-              };
-
-              setUser(authUser);
-              try {
-                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(authUser));
-              } catch {}
-
-              // Also notify backend in background
-              fetchUserRole(authUser.uid, authUser.idToken).catch(() => {});
-              resolve();
+        // Fetch Google User Profile using accessToken or decode idToken
+        let profile: any = {};
+        if (accessToken) {
+          try {
+            const userRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+              headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (userRes.ok) {
+              profile = await userRes.json();
             }
+          } catch {
+            // ignore
           }
-        } catch {
-          // Cross-origin access in popup until redirected back
+        }
+
+        if (!profile.email && idToken) {
+          try {
+            const payloadBase64 = idToken.split(".")[1];
+            profile = JSON.parse(atob(payloadBase64));
+          } catch {
+            // ignore
+          }
+        }
+
+        const authUser: AuthUser = {
+          uid: profile.sub || profile.id || `google-${Date.now()}`,
+          email: profile.email || "user@google.com",
+          displayName: profile.name || profile.given_name || "Người dùng Google",
+          photoURL: profile.picture || null,
+          role: "user",
+          idToken: idToken || accessToken,
+        };
+
+        setUser(authUser);
+        try {
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(authUser));
+        } catch {}
+
+        // Also notify backend in background
+        fetchUserRole(authUser.uid, authUser.idToken).catch(() => {});
+        resolve();
+      };
+
+      const onMessage = (event: MessageEvent) => {
+        if (event.origin !== redirectUri) return;
+        if (!event.data || event.data.type !== "google-oauth-callback") return;
+        const hash: string = event.data.hash || "";
+        if (!/[#&]?(access_token|id_token)=/.test(hash)) return;
+        void completeSignIn(hash);
+      };
+
+      window.addEventListener("message", onMessage);
+
+      // Watchdog: user closed the popup without finishing.
+      const closeWatcher = setInterval(() => {
+        if (popup.closed && !settled) {
+          settled = true;
+          cleanup();
+          resolve();
         }
       }, 500);
     });

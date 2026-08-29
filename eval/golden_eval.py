@@ -570,8 +570,15 @@ def validate_golden_dataset(dataset_path: Path, source_dir: Path) -> dict[str, A
     }
 
 
+def _strip_vietnamese_diacritics(value: str) -> str:
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFD", value)
+    return "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+
+
 def _normalize_text(value: str) -> str:
-    normalized = value.casefold().replace("đ", "d")
+    normalized = _strip_vietnamese_diacritics(value.casefold()).replace("đ", "d").replace("Đ", "d")
     normalized = re.sub(r"[^\w%]+", " ", normalized, flags=re.UNICODE)
     return re.sub(r"\s+", " ", normalized).strip()
 
@@ -864,9 +871,11 @@ def generate_actual_answers(dataset_path: Path, output_path: Path, run_id: str) 
                 return {
                     "chunk_id": item.get("chunk_id"),
                     "document_id": item.get("document_id"),
-                    "title": item.get("title", ""),
+                    "title": item.get("title", item.get("document_number", "")),
                     "section_title": item.get("section_title", ""),
-                    "text": str(item.get("content", item.get("text", "")))[:4000],
+                    "text": str(
+                        item.get("content", item.get("text", item.get("quote", "")))
+                    )[:4000],
                     "score": item.get("score"),
                     "channels": item.get("channels", []),
                 }
@@ -879,6 +888,20 @@ def generate_actual_answers(dataset_path: Path, output_path: Path, run_id: str) 
                 "score": getattr(item, "score", None),
                 "channels": getattr(item, "channels", []),
             }
+
+        def retrieved_contexts_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+            retrieved = [evidence_summary(item) for item in result.get("retrieved_evidence", [])]
+            if retrieved:
+                return retrieved
+            citations = result.get("citations", [])
+            if isinstance(citations, list) and citations:
+                return [evidence_summary(item) for item in citations]
+            structured = result.get("structured_output", {})
+            if isinstance(structured, dict):
+                structured_citations = structured.get("citations", [])
+                if isinstance(structured_citations, list) and structured_citations:
+                    return [evidence_summary(item) for item in structured_citations]
+            return []
 
         async def run_all() -> None:
             for case in cases:
@@ -894,9 +917,7 @@ def generate_actual_answers(dataset_path: Path, output_path: Path, run_id: str) 
                             "attempt": 1,
                             "answer": answer,
                             "structured_output": {"citations": result.get("citations", [])},
-                            "retrieved_contexts": [
-                                evidence_summary(item) for item in result.get("retrieved_evidence", [])
-                            ],
+                            "retrieved_contexts": retrieved_contexts_from_result(result),
                             "tool_calls": [],
                             "state_events": [],
                             "status": "completed" if answer else "invalid_output",
@@ -983,7 +1004,7 @@ def score_ragas_answers(
     try:
         from dotenv import load_dotenv
 
-        load_dotenv(PROJECT_ROOT / ".env", override=False)
+        load_dotenv(PROJECT_ROOT / ".env", override=True)
         from langchain_openai import ChatOpenAI, OpenAIEmbeddings
         from ragas import SingleTurnSample
         from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -1640,7 +1661,7 @@ def _cli() -> int:
         try:
             from dotenv import load_dotenv
 
-            load_dotenv(PROJECT_ROOT / ".env", override=False)
+            load_dotenv(PROJECT_ROOT / ".env", override=True)
         except ImportError:
             pass
         started_at = datetime.now(UTC).isoformat()
