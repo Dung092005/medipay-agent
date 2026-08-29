@@ -83,12 +83,12 @@ class UnconfiguredEmbeddingModel:
 @lru_cache(maxsize=1)
 def get_embedding_model() -> EmbeddingModel:
     settings = get_settings()
-    api_key = settings.embedding_api_key or settings.openai_api_key
+    api_key = (settings.embedding_api_key or settings.openai_api_key).strip()
     if not api_key:
         return UnconfiguredEmbeddingModel()
 
-    base_url = settings.openai_base_url or ""
-    model = settings.embedding_model
+    base_url = (settings.openai_base_url or "").strip().strip("\"'")
+    model = settings.embedding_model.strip()
 
     # Automatically route OpenRouter keys or recover from dead yescale proxy
     if api_key.startswith("sk-or-") or "yescale" in base_url.lower():
